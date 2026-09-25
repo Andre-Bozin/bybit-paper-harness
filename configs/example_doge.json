@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "created": "2026-09-22",
+    "duration_days": 7,
+    "symbol": "DOGEUSDT",
+    "start_balance": 3.4813,
+    "note": "v3: % formulas, DOGEUSDT, min_std_dev in %"
+  },
+  "agents": [
+    {
+      "id": 1,
+      "name": "base_fade",
+      "signal": "fade_obi",
+      "qty": 100,
+      "obi_threshold": 0.65,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 1.0,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    },
+    {
+      "id": 2,
+      "name": "direct_obi",
+      "signal": "direct_obi",
+      "qty": 100,
+      "obi_threshold": 0.65,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 1.0,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    },
+    {
+      "id": 3,
+      "name": "mom10",
+      "signal": "momentum_10s",
+      "qty": 100,
+      "obi_threshold": 0.0,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 1.0,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    },
+    {
+      "id": 4,
+      "name": "meanrev",
+      "signal": "meanrev_10s",
+      "qty": 100,
+      "obi_threshold": 0.0,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 1.0,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    },
+    {
+      "id": 5,
+      "name": "wideSL",
+      "signal": "fade_obi",
+      "qty": 100,
+      "obi_threshold": 0.65,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 2.0,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    },
+    {
+      "id": 6,
+      "name": "narrowSL",
+      "signal": "fade_obi",
+      "qty": 100,
+      "obi_threshold": 0.65,
+      "min_std_dev": 0.05,
+      "tp_sl_ratio": 0.5,
+      "decay_start": 180,
+      "decay_duration": 600,
+      "hard_kill": 900,
+      "sl_cooldown": 300
+    }
+  ]
+}

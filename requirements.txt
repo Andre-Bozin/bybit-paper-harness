@@ -1,0 +1,5 @@
+# Core dependencies
+pybit>=5.17,<6
+websockets>=12,<18
+aiohttp>=3.9,<4
+python-dotenv>=1.0,<2
