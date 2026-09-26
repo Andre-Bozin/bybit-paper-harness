@@ -67,6 +67,9 @@ class Agent:
         self._last_placed_side = None
         self._last_side_change = 0.0
         self._order_place_cooldown = 2.0  # не переставлять чаще 2s
+        # Значения сигнала на момент решения (PLACE). Используются в ENTRY.
+        self._place_sigma_pct = 0.0
+        self._place_obi = 0.0
 
     # --- Public API ---
 
@@ -117,9 +120,12 @@ class Agent:
             self.active_oid = self.session.place_limit(side, price, self.qty)
             self._last_placed_side = side
             self._last_side_change = now
+            # Фиксируем сигнал на момент решения — именно его логируем и в ENTRY
+            self._place_sigma_pct = self.market.current_std_dev_pct
+            self._place_obi = self.market.current_obi
             self._log({"event": "PLACE", "side": side, "price": price,
-                       "sigma_pct": self.market.current_std_dev_pct,
-                       "obi": self.market.current_obi})
+                       "sigma_pct": self._place_sigma_pct,
+                       "obi": self._place_obi})
         except ValueError as e:
             # qty/min_notional/tick validation fail — не критично, пропускаем
             self._log({"event": "PLACE_REJECTED", "side": side, "price": price,
@@ -178,8 +184,9 @@ class Agent:
             "event": "ENTRY",
             "side": self.position_side,
             "price": self.entry_price,
-            "sigma_pct": self.market.current_std_dev_pct,
-            "obi": self.market.current_obi,
+            # Значения сигнала на момент решения (PLACE), а не на момент fill
+            "sigma_pct": self._place_sigma_pct,
+            "obi": self._place_obi,
             "tp": self.current_tp,
             "sl": self.sl_price,
             "tp_pct": tp_pct,
@@ -303,6 +310,8 @@ class Agent:
         self.active_oid = None
         self.tp_oid = None
         self._last_placed_side = None
+        self._place_sigma_pct = 0.0
+        self._place_obi = 0.0
 
     def _log(self, event: dict) -> None:
         event["ts"] = time.time()

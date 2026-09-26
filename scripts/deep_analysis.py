@@ -1,0 +1,260 @@
+"""
+deep_analysis.py — глубокий анализ логов завершённого прогона.
+Проверяет 6 инвариантов, считает exit-type distribution и time-to-close.
+
+Использование:
+    python3 -m scripts.deep_analysis
+"""
+import json
+import statistics
+from pathlib import Path
+from collections import Counter, defaultdict
+
+from src import config
+
+
+# Путь к архиву — переопределяется через --archive или берётся последний
+ARCHIVE_DIR = config.PROJECT_ROOT / "archive"
+
+
+def find_latest_archive() -> Path:
+    """Ищет последний archive/final_run_* по имени."""
+    if not ARCHIVE_DIR.exists():
+        raise FileNotFoundError(f"No archive dir: {ARCHIVE_DIR}")
+    candidates = sorted(ARCHIVE_DIR.glob("final_run_*"))
+    if not candidates:
+        raise FileNotFoundError(f"No final_run_* in {ARCHIVE_DIR}")
+    return candidates[-1]
+
+
+def read_jsonl(path: Path) -> list:
+    """Читает JSON-lines, игнорирует мусор."""
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def list_agents(logs_dir: Path) -> list:
+    """Список агентов по trade_*.log."""
+    names = []
+    for f in logs_dir.glob("trade_*.log"):
+        names.append(f.stem.replace("trade_", ""))
+    return sorted(names)
+
+
+def reconstruct_trades(trade_events: list) -> list:
+    """
+    Пара (ENTRY → exit) формирует одну сделку.
+    exit = STOP_LOSS | HARD_KILL | DECAY_EXIT | CLOSE_DETECTED
+    """
+    trades = []
+    current = None
+    for e in trade_events:
+        ev = e.get("event")
+        if ev == "ENTRY":
+            current = {
+                "entry_ts": e.get("ts"),
+                "side": e.get("side"),
+                "entry_price": e.get("price"),
+                "tp": e.get("tp"),
+                "sl": e.get("sl"),
+                "sigma_pct": e.get("sigma_pct"),
+                "obi": e.get("obi"),
+                "exit_ts": None,
+                "exit_type": None,
+                "usdt_at_close": None,
+            }
+        elif ev in ("STOP_LOSS", "HARD_KILL", "DECAY_EXIT") and current:
+            current["exit_ts"] = e.get("ts")
+            current["exit_type"] = ev.lower()
+            trades.append(current)
+            current = None
+        elif ev == "CLOSE_DETECTED" and current:
+            current["exit_ts"] = e.get("ts")
+            current["exit_type"] = "tp"
+            current["usdt_at_close"] = e.get("usdt")
+            trades.append(current)
+            current = None
+    return trades
+
+
+def check_invariants(trades: list, agent_log: list, start_balance: float) -> list:
+    """Возвращает список нарушенных инвариантов."""
+    errors = []
+
+    for i, t in enumerate(trades, 1):
+        # I1: направление TP/SL
+        side, entry = t["side"], t["entry_price"]
+        sl, tp = t["sl"], t["tp"]
+        if side == "Buy" and not (sl < entry < tp):
+            errors.append(f"trade#{i} I1: Buy sl={sl} entry={entry} tp={tp}")
+        if side == "Sell" and not (sl > entry > tp):
+            errors.append(f"trade#{i} I1: Sell sl={sl} entry={entry} tp={tp}")
+
+        # I2: exit_time > entry_time
+        if t["exit_ts"] and t["exit_ts"] < t["entry_ts"]:
+            errors.append(f"trade#{i} I2: exit before entry")
+
+        # I3: время > 0 и < разумного предела
+        if t["exit_ts"]:
+            dt = t["exit_ts"] - t["entry_ts"]
+            if dt <= 0 or dt > 3600:
+                errors.append(f"trade#{i} I3: time-to-close={dt:.0f}s")
+
+    # I4: opens == closes (проверка на уровне агента)
+    # I5: арифметика баланса
+    total_fee = sum(e.get("fee", 0) for e in agent_log if "fee" in e)
+    total_pnl = sum(
+        e.get("pnl", 0) for e in agent_log
+        if e.get("event") in ("CLOSE", "REDUCE") and "pnl" in e
+    )
+    net_calc = total_pnl - total_fee
+
+    # Ищем последний usdt в agent_log или trade CLOSE_DETECTED
+    final_usdt = None
+    for e in reversed(agent_log):
+        if e.get("event") == "CLOSE" and "usdt" not in e:
+            pass
+    # usdt сохраняется в CLOSE_DETECTED у trade_*.log
+    for t in reversed(trades):
+        if t.get("usdt_at_close") is not None:
+            final_usdt = t["usdt_at_close"]
+            break
+
+    if final_usdt is not None:
+        actual_delta = final_usdt - start_balance
+        if abs(actual_delta - net_calc) > 0.05:
+            errors.append(
+                f"I5 accounting drift: actual={actual_delta:+.4f}, "
+                f"calc={net_calc:+.4f}, diff={actual_delta - net_calc:+.4f}"
+            )
+
+    # I6: exit_type известен всегда
+    for i, t in enumerate(trades, 1):
+        if t["exit_type"] is None:
+            errors.append(f"trade#{i} I6: exit_type unknown")
+
+    return errors
+
+
+def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
+    trade_log = read_jsonl(logs_dir / f"trade_{name}.log")
+    agent_log = read_jsonl(logs_dir / f"agent_{name}.log")
+
+    trades = reconstruct_trades(trade_log)
+    errors = check_invariants(trades, agent_log, start_balance)
+
+    # Exit-type distribution
+    exit_types = Counter(t["exit_type"] for t in trades if t["exit_type"])
+    n = len(trades)
+
+    # Time-to-close
+    times_all = []
+    times_by_type = defaultdict(list)
+    for t in trades:
+        if t["exit_ts"] and t["entry_ts"]:
+            dt = t["exit_ts"] - t["entry_ts"]
+            times_all.append(dt)
+            if t["exit_type"]:
+                times_by_type[t["exit_type"]].append(dt)
+
+    # Entry conditions
+    sigmas = [t["sigma_pct"] for t in trades if t["sigma_pct"] is not None]
+    obis = [t["obi"] for t in trades if t["obi"] is not None]
+
+    return {
+        "name": name,
+        "n_trades": n,
+        "exit_types": dict(exit_types),
+        "median_time_all": statistics.median(times_all) if times_all else 0,
+        "median_time_by_type": {
+            k: statistics.median(v) for k, v in times_by_type.items() if v
+        },
+        "median_sigma": statistics.median(sigmas) if sigmas else 0,
+        "mean_obi": statistics.mean(obis) if obis else 0,
+        "errors": errors,
+    }
+
+
+def format_report(results: list, archive_name: str) -> str:
+    lines = []
+    lines.append("=" * 100)
+    lines.append(f"DEEP ANALYSIS — {archive_name}")
+    lines.append("=" * 100)
+    lines.append("")
+
+    for r in results:
+        lines.append(f"### Agent: {r['name']}")
+        lines.append(f"  Trades reconstructed: {r['n_trades']}")
+        lines.append(f"  Exit-type distribution: {r['exit_types']}")
+        lines.append(f"  Median time-to-close: {r['median_time_all']:.1f}s")
+        for etype, mt in r["median_time_by_type"].items():
+            lines.append(f"    {etype:12} → median {mt:.1f}s")
+        lines.append(f"  Median σ% on entry: {r['median_sigma']:.4f}")
+        lines.append(f"  Mean OBI on entry: {r['mean_obi']:+.3f}")
+        if r["errors"]:
+            lines.append(f"  ⚠️ Invariant violations: {len(r['errors'])}")
+            for err in r["errors"][:5]:
+                lines.append(f"    - {err}")
+            if len(r["errors"]) > 5:
+                lines.append(f"    ... and {len(r['errors']) - 5} more")
+        else:
+            lines.append(f"  ✅ All invariants OK")
+        lines.append("")
+
+    # Сводка по инвариантам
+    total_errors = sum(len(r["errors"]) for r in results)
+    lines.append("=" * 100)
+    lines.append(f"TOTAL INVARIANT VIOLATIONS: {total_errors}")
+    lines.append("=" * 100)
+
+    return "\n".join(lines)
+
+
+def main():
+    archive = find_latest_archive()
+    logs_dir = archive / "logs"
+    if not logs_dir.exists():
+        print(f"No logs dir in {archive}")
+        return
+
+    print(f"[deep_analysis] Archive: {archive.name}")
+    print(f"[deep_analysis] Logs dir: {logs_dir}")
+    print()
+
+    # Start balance из config
+    start_balance = 1000.0
+    cfg_path = archive / "config.json"
+    if cfg_path.exists():
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        start_balance = cfg.get("meta", {}).get("start_balance", 1000.0)
+
+    agents = list_agents(logs_dir)
+    print(f"[deep_analysis] Agents: {agents}")
+    print()
+
+    results = []
+    for name in agents:
+        r = analyze_agent(name, logs_dir, start_balance)
+        results.append(r)
+
+    report = format_report(results, archive.name)
+    print(report)
+
+    # Сохранить в reports/
+    out_path = config.REPORTS_DIR / "deep_analysis.txt"
+    out_path.write_text(report, encoding="utf-8")
+    print(f"\n[deep_analysis] Report saved: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

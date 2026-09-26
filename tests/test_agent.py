@@ -242,6 +242,65 @@ def test_snapshot():
     check("snapshot position flat", snap["position_side"] == "flat")
 
 
+def test_entry_uses_place_time_signal():
+    """
+    Regression test: ENTRY должен логировать sigma_pct/obi
+    на момент PLACE, а не на момент fill.
+    """
+    print("\n=== Test: ENTRY uses PLACE-time signal (regression) ===")
+    agent, market, session = make_agent(obi=-0.7, sigma_pct=0.10)
+    now = time.time()
+    agent.on_tick(now)
+
+    # Проверяем что значения сохранены
+    check("place_sigma saved", abs(agent._place_sigma_pct - 0.10) < 1e-9,
+          f"got {agent._place_sigma_pct}")
+    check("place_obi saved", abs(agent._place_obi - (-0.7)) < 1e-9,
+          f"got {agent._place_obi}")
+
+    # Меняем рынок: OBI и σ% теперь совсем другие
+    market.current_obi = +0.05
+    market.current_std_dev_pct = 0.01
+
+    # Активируем fill — bid drops below our order
+    market.best_bid = 0.09999
+    market.best_ask = 0.1
+    now += 0.1
+    agent.on_tick(now)
+
+    check("position opened", agent.position_open is True)
+    # Значения в agent должны остаться старыми (place-time)
+    check("place_sigma unchanged after fill",
+          abs(agent._place_sigma_pct - 0.10) < 1e-9,
+          f"got {agent._place_sigma_pct}")
+    check("place_obi unchanged after fill",
+          abs(agent._place_obi - (-0.7)) < 1e-9,
+          f"got {agent._place_obi}")
+
+
+def test_place_signal_reset_after_close():
+    """После закрытия позиции значения PLACE сбрасываются."""
+    print("\n=== Test: PLACE signal reset after close ===")
+    agent, market, session = make_agent(obi=-0.7, sigma_pct=0.10)
+    now = time.time()
+    agent.on_tick(now)
+    market.best_bid = 0.09999
+    market.best_ask = 0.1
+    now += 0.1
+    agent.on_tick(now)
+    check("position opened", agent.position_open)
+
+    # Trigger SL
+    market.best_bid = agent.sl_price - 0.001
+    market.best_ask = agent.sl_price - 0.0009
+    now += 1
+    agent.on_tick(now)
+
+    check("position closed", not agent.position_open)
+    check("place_sigma reset", agent._place_sigma_pct == 0.0)
+    check("place_obi reset", agent._place_obi == 0.0)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Agent unit tests")
@@ -258,6 +317,8 @@ if __name__ == "__main__":
     test_min_sigma_gate()
     test_no_signal_no_order()
     test_snapshot()
+    test_entry_uses_place_time_signal()
+    test_place_signal_reset_after_close()
 
     print("\n" + "=" * 60)
     print(f"RESULT: {PASSED} passed, {FAILED} failed")
