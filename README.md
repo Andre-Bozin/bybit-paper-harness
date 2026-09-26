@@ -5,6 +5,7 @@
 Test strategies against live order books — without risking capital.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Tests](https://github.com/Andre-Bozin/bybit-paper-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/Andre-Bozin/bybit-paper-harness/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
