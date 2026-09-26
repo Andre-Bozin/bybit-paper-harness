@@ -87,8 +87,11 @@ def reconstruct_trades(trade_events: list) -> list:
     return trades
 
 
-def check_invariants(trades: list, agent_log: list, start_balance: float) -> list:
-    """Возвращает список нарушенных инвариантов."""
+def check_invariants(trades: list, trade_events: list, agent_log: list,
+                     start_balance: float) -> list:
+    """Возвращает список нарушенных инвариантов.
+    trade_events — сырые события из trade_*.log (для FINAL_SNAPSHOT).
+    agent_log — события из agent_*.log (для fee/pnl)."""
     errors = []
 
     for i, t in enumerate(trades, 1):
@@ -111,7 +114,7 @@ def check_invariants(trades: list, agent_log: list, start_balance: float) -> lis
                 errors.append(f"trade#{i} I3: time-to-close={dt:.0f}s")
 
     # I4: opens == closes (проверка на уровне агента)
-    # I5: арифметика баланса
+    # I5: арифметика баланса (использует FINAL_SNAPSHOT если есть)
     total_fee = sum(e.get("fee", 0) for e in agent_log if "fee" in e)
     total_pnl = sum(
         e.get("pnl", 0) for e in agent_log
@@ -119,22 +122,31 @@ def check_invariants(trades: list, agent_log: list, start_balance: float) -> lis
     )
     net_calc = total_pnl - total_fee
 
-    # Ищем последний usdt в agent_log или trade CLOSE_DETECTED
+    # Приоритет: FINAL_SNAPSHOT (точное состояние на момент shutdown)
+    # Fallback: последний CLOSE_DETECTED (может быть неточным из-за открытой позиции)
     final_usdt = None
-    for e in reversed(agent_log):
-        if e.get("event") == "CLOSE" and "usdt" not in e:
-            pass
-    # usdt сохраняется в CLOSE_DETECTED у trade_*.log
-    for t in reversed(trades):
-        if t.get("usdt_at_close") is not None:
-            final_usdt = t["usdt_at_close"]
+    final_source = None
+    for e in reversed(trade_events):
+        if e.get("event") == "FINAL_SNAPSHOT" and "usdt" in e:
+            final_usdt = e["usdt"]
+            final_source = "final_snapshot"
             break
+
+    if final_usdt is None:
+        # Старые логи без FINAL_SNAPSHOT — fallback на CLOSE_DETECTED
+        for t in reversed(trades):
+            if t.get("usdt_at_close") is not None:
+                final_usdt = t["usdt_at_close"]
+                final_source = "close_detected_fallback"
+                break
 
     if final_usdt is not None:
         actual_delta = final_usdt - start_balance
-        if abs(actual_delta - net_calc) > 0.05:
+        # Допуск 0.05 только для fallback (FINAL_SNAPSHOT должен точно совпадать)
+        tolerance = 0.05 if final_source == "close_detected_fallback" else 0.001
+        if abs(actual_delta - net_calc) > tolerance:
             errors.append(
-                f"I5 accounting drift: actual={actual_delta:+.4f}, "
+                f"I5 accounting drift ({final_source}): actual={actual_delta:+.4f}, "
                 f"calc={net_calc:+.4f}, diff={actual_delta - net_calc:+.4f}"
             )
 
@@ -151,7 +163,7 @@ def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
     agent_log = read_jsonl(logs_dir / f"agent_{name}.log")
 
     trades = reconstruct_trades(trade_log)
-    errors = check_invariants(trades, agent_log, start_balance)
+    errors = check_invariants(trades, trade_log, agent_log, start_balance)
 
     # Exit-type distribution
     exit_types = Counter(t["exit_type"] for t in trades if t["exit_type"])

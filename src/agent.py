@@ -146,6 +146,20 @@ class Agent:
             "in_cooldown": time.time() < self.sl_until,
         }
 
+    def final_snapshot(self) -> None:
+        """Логирует финальное состояние при остановке harness.
+        Используется deep_analysis.py для точного final_usdt."""
+        pos = self.session.position
+        self._log({
+            "event": "FINAL_SNAPSHOT",
+            "usdt": round(self.session.usdt, 6),
+            "position_size": pos["size"],
+            "position_side": pos["side"] or "",
+            "avg_price": pos["avgPrice"],
+            "open_orders": len(self.session.orders),
+            "position_open": self.position_open,
+        })
+
     # --- Entry / Manage / Close ---
 
     def _on_entry(self, now: float) -> None:

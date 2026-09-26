@@ -183,12 +183,27 @@ class Harness:
                 )
             self.events.info(f"[STATUS] {' | '.join(parts)}")
 
+    def shutdown(self) -> None:
+        """Логирует финальный snapshot каждого агента."""
+        self.events.info("[SYSTEM] SHUTDOWN: capturing final snapshots...")
+        for agent in self.agents:
+            try:
+                agent.final_snapshot()
+            except Exception as e:
+                self.events.error(f"[SYSTEM] final_snapshot error for {agent.name}: {e}")
+        self.events.info("[SYSTEM] SHUTDOWN: snapshots saved.")
+
     async def run(self) -> None:
         self.events.info("[SYSTEM] Harness v3 starting async tasks...")
-        await asyncio.gather(
-            self.ws_loop(),
-            self.status_loop(interval=300),
-        )
+        try:
+            await asyncio.gather(
+                self.ws_loop(),
+                self.status_loop(interval=300),
+            )
+        except asyncio.CancelledError:
+            self.events.info("[SYSTEM] Tasks cancelled, running shutdown sequence...")
+            self.shutdown()
+            raise
 
 
 def main():
@@ -211,8 +226,49 @@ def main():
     print("[harness] Logs: logs/events.log + logs/trade_*.log")
     print()
 
+    async def _run_with_signals():
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def _handle_signal(sig_name: str):
+            print(f"\n[harness] Signal {sig_name} received, stopping...")
+            stop_event.set()
+
+        for sig_name in ("SIGTERM", "SIGINT"):
+            try:
+                loop.add_signal_handler(
+                    getattr(__import__("signal"), sig_name),
+                    _handle_signal, sig_name,
+                )
+            except (AttributeError, NotImplementedError):
+                pass
+
+        # Запускаем основной run() и ждём сигнал
+        main_task = asyncio.create_task(h.run())
+        stop_task = asyncio.create_task(stop_event.wait())
+
+        done, pending = await asyncio.wait(
+            [main_task, stop_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Если пришёл сигнал — отменяем main_task
+        if stop_task in done and not main_task.done():
+            main_task.cancel()
+            try:
+                await main_task
+            except asyncio.CancelledError:
+                pass
+
+        # Если main_task упал сам — не мешаем
+        if main_task.done() and not main_task.cancelled():
+            try:
+                await main_task
+            except Exception as e:
+                print(f"[harness] Fatal error: {e}")
+
     try:
-        asyncio.run(h.run())
+        asyncio.run(_run_with_signals())
     except KeyboardInterrupt:
         print("\n[harness] Interrupted by user")
         sys.exit(0)
