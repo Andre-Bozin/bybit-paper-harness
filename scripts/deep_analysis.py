@@ -17,7 +17,7 @@ from src import config
 ARCHIVE_DIR = config.PROJECT_ROOT / "archive"
 
 
-def find_latest_archive() -> Path:
+def find_latest_archive() -> Path:  # noqa: D401
     """Ищет последний archive/final_run_* по имени."""
     if not ARCHIVE_DIR.exists():
         raise FileNotFoundError(f"No archive dir: {ARCHIVE_DIR}")
@@ -28,7 +28,7 @@ def find_latest_archive() -> Path:
 
 
 def read_jsonl(path: Path) -> list:
-    """Читает JSON-lines, игнорирует мусор."""
+    """Читает JSON-lines, игнорирует мусор, сортирует по ts."""
     if not path.exists():
         return []
     events = []
@@ -40,14 +40,16 @@ def read_jsonl(path: Path) -> list:
             events.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    events.sort(key=lambda e: e.get("ts", 0))
     return events
 
 
 def list_agents(logs_dir: Path) -> list:
-    """Список агентов по trade_*.log."""
+    """Список агентов по trade_*.log (slice префикса, не replace)."""
+    prefix = "trade_"
     names = []
-    for f in logs_dir.glob("trade_*.log"):
-        names.append(f.stem.replace("trade_", ""))
+    for f in logs_dir.glob(f"{prefix}*.log"):
+        names.append(f.stem[len(prefix):])
     return sorted(names)
 
 
@@ -187,12 +189,12 @@ def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
         "name": name,
         "n_trades": n,
         "exit_types": dict(exit_types),
-        "median_time_all": statistics.median(times_all) if times_all else 0,
+        "median_time_all": statistics.median(times_all) if times_all else None,
         "median_time_by_type": {
             k: statistics.median(v) for k, v in times_by_type.items() if v
         },
-        "median_sigma": statistics.median(sigmas) if sigmas else 0,
-        "mean_obi": statistics.mean(obis) if obis else 0,
+        "median_sigma": statistics.median(sigmas) if sigmas else None,
+        "mean_obi": statistics.mean(obis) if obis else None,
         "errors": errors,
     }
 
@@ -204,17 +206,43 @@ def format_report(results: list, archive_name: str) -> str:
     lines.append("=" * 100)
     lines.append("")
 
+    # Aggregates
+    total_trades = 0
+    total_exit_types = Counter()
+    total_times = []
+
     for r in results:
-        lines.append(f"### Agent: {r['name']}")
+        symbol = r.get("symbol", "?")
+        lines.append(f"### Agent: {r['name']} ({symbol})")
         lines.append(f"  Trades reconstructed: {r['n_trades']}")
-        lines.append(f"  Exit-type distribution: {r['exit_types']}")
-        lines.append(f"  Median time-to-close: {r['median_time_all']:.1f}s")
-        for etype, mt in r["median_time_by_type"].items():
+
+        if r["exit_types"]:
+            exit_str = ", ".join(f"{k}={v}" for k, v in sorted(r["exit_types"].items()))
+            lines.append(f"  Exit-type distribution: {exit_str}")
+            total_exit_types.update(r["exit_types"])
+        else:
+            lines.append("  Exit-type distribution: (none)")
+
+        if r["median_time_all"] is not None:
+            lines.append(f"  Median time-to-close: {r['median_time_all']:.1f}s")
+        else:
+            lines.append("  Median time-to-close: n/a")
+
+        for etype, mt in sorted(r["median_time_by_type"].items()):
             lines.append(f"    {etype:12} → median {mt:.1f}s")
-        lines.append(f"  Median σ% on entry: {r['median_sigma']:.4f}")
-        lines.append(f"  Mean OBI on entry: {r['mean_obi']:+.3f}")
+
+        if r["median_sigma"] is not None:
+            lines.append(f"  Median σ% on entry: {r['median_sigma']:.4f}")
+        else:
+            lines.append("  Median σ% on entry: n/a")
+
+        if r["mean_obi"] is not None:
+            lines.append(f"  Mean OBI on entry: {r['mean_obi']:+.3f}")
+        else:
+            lines.append("  Mean OBI on entry: n/a")
+
         if r["errors"]:
-            lines.append(f"  ⚠️ Invariant violations: {len(r['errors'])}")
+            lines.append(f"  ⚠️  Invariant violations: {len(r['errors'])}")
             for err in r["errors"][:5]:
                 lines.append(f"    - {err}")
             if len(r["errors"]) > 5:
@@ -223,9 +251,20 @@ def format_report(results: list, archive_name: str) -> str:
             lines.append(f"  ✅ All invariants OK")
         lines.append("")
 
-    # Сводка по инвариантам
-    total_errors = sum(len(r["errors"]) for r in results)
+        total_trades += r["n_trades"]
+        if r["median_time_all"] is not None:
+            total_times.append(r["median_time_all"])
+
+    # Aggregate summary
     lines.append("=" * 100)
+    lines.append(f"TOTAL TRADES: {total_trades}")
+    if total_exit_types:
+        agg = ", ".join(f"{k}={v}" for k, v in sorted(total_exit_types.items()))
+        lines.append(f"TOTAL exit types: {agg}")
+    if total_times:
+        lines.append(f"Median of medians (time-to-close): {statistics.median(total_times):.1f}s")
+
+    total_errors = sum(len(r["errors"]) for r in results)
     lines.append(f"TOTAL INVARIANT VIOLATIONS: {total_errors}")
     lines.append("=" * 100)
 
@@ -233,22 +272,55 @@ def format_report(results: list, archive_name: str) -> str:
 
 
 def main():
-    archive = find_latest_archive()
+    """
+    Читает последний (или указанный) archive/final_run_*, проверяет
+    инварианты, генерирует отчёт в reports/deep_analysis.txt.
+
+    CLI:
+        python3 -m scripts.deep_analysis
+        python3 -m scripts.deep_analysis --archive archive/final_run_20260927
+    """
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(description="Deep analysis of a completed harness run")
+    parser.add_argument(
+        "--archive", "-a",
+        default=None,
+        help="Path to archive/final_run_* (default: latest)",
+    )
+    args = parser.parse_args()
+
+    if args.archive:
+        archive = Path(args.archive).resolve()
+        if not archive.exists():
+            print(f"[deep_analysis] ERROR: archive not found: {archive}")
+            return
+    else:
+        archive = find_latest_archive()
+
     logs_dir = archive / "logs"
     if not logs_dir.exists():
-        print(f"No logs dir in {archive}")
+        print(f"[deep_analysis] ERROR: no logs dir in {archive}")
         return
 
     print(f"[deep_analysis] Archive: {archive.name}")
     print(f"[deep_analysis] Logs dir: {logs_dir}")
     print()
 
-    # Start balance из config
+    # Config из archive (start_balance + symbol map)
     start_balance = 1000.0
+    symbol_map = {}
     cfg_path = archive / "config.json"
     if cfg_path.exists():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        start_balance = cfg.get("meta", {}).get("start_balance", 1000.0)
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            start_balance = cfg.get("meta", {}).get("start_balance", 1000.0)
+            symbol_map = {
+                a.get("name"): a.get("symbol", "?")
+                for a in cfg.get("agents", [])
+            }
+        except json.JSONDecodeError as e:
+            print(f"[deep_analysis] WARN: cannot parse config.json: {e}")
 
     agents = list_agents(logs_dir)
     print(f"[deep_analysis] Agents: {agents}")
@@ -257,12 +329,12 @@ def main():
     results = []
     for name in agents:
         r = analyze_agent(name, logs_dir, start_balance)
+        r["symbol"] = symbol_map.get(name, "?")
         results.append(r)
 
     report = format_report(results, archive.name)
     print(report)
 
-    # Сохранить в reports/
     out_path = config.REPORTS_DIR / "deep_analysis.txt"
     out_path.write_text(report, encoding="utf-8")
     print(f"\n[deep_analysis] Report saved: {out_path}")
