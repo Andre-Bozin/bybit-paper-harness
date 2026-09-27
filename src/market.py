@@ -32,10 +32,20 @@ class MarketState:
     # --- Orderbook updates ---
 
     def apply_orderbook(self, data: dict, is_snapshot: bool) -> None:
-        """Применяет snapshot или delta к локальному стакану."""
+        """
+        Применяет snapshot или delta к локальному стакану.
+
+        При snapshot также сбрасывает price_history и trade_history —
+        старые mid-price и trades относятся к предыдущему соединению
+        (или к моменту до реконнекта) и делают σ% некорректной.
+        """
         if is_snapshot:
             self.bids.clear()
             self.asks.clear()
+            self.price_history.clear()
+            self.trade_history.clear()
+            self.current_std_dev = 0.0
+            self.current_std_dev_pct = 0.0
 
         for price_str, size_str in data.get("b", []):
             price = float(price_str)
@@ -85,6 +95,12 @@ class MarketState:
             self.current_std_dev_pct = (
                 (self.current_std_dev / mid * 100.0) if mid > 0 else 0.0
             )
+        else:
+            # Недостаточно данных — σ% сбрасывается в 0.
+            # Это защищает от торговли по устаревшему сигналу,
+            # когда WS-поток символа затих и ticks не приходят.
+            self.current_std_dev = 0.0
+            self.current_std_dev_pct = 0.0
 
     def add_trades(self, trades: list, ts: float) -> None:
         """Добавляет публичные сделки. trades = [{S, v}, ...]."""
@@ -120,7 +136,10 @@ class MarketState:
         """
         Полный апдейт: refresh best, обновить σ%, OBI.
         Вызывается после apply_orderbook + add_trades.
-        Возвращает True если рынок готов (есть стакан и σ посчитана).
+
+        Возвращает True если стакан непустой (best_bid/best_ask > 0).
+        σ% может быть 0 при недостатке samples — это норма для
+        медленного рынка; gate по min_std_dev находится в Agent.
         """
         if not self.refresh_best():
             return False

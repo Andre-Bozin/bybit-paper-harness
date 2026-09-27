@@ -160,6 +160,66 @@ def test_tick_readiness():
     check("tick succeeds with data", m.tick(time.time()) is True)
 
 
+def test_sigma_resets_on_insufficient_samples():
+    print("\n=== Test: sigma resets when samples < MIN ===")
+    m = MarketState("DOGEUSDT")
+    m.apply_orderbook({
+        "b": [["0.1", "100"]],
+        "a": [["0.10001", "100"]],
+    }, is_snapshot=True)
+
+    # Прогреваем до 60 samples → σ% должна стать > 0
+    base = time.time() - 70
+    for i in range(60):
+        m.best_bid = 0.1 + (i % 3) * 0.00001
+        m.best_ask = 0.10001 + (i % 3) * 0.00001
+        m.update_sigma(base + i)
+    check("sigma_pct > 0 initially", m.current_std_dev_pct > 0)
+
+    # Теперь "сбой" — приходит лишь 5 samples. Все старые уйдут за 60с.
+    later = base + 100
+    for i in range(5):
+        m.best_bid = 0.1
+        m.best_ask = 0.10001
+        m.update_sigma(later + i)
+
+    # Старые 60 samples должны быть вытеснены окном 60 сек
+    check("sigma_pct reset to 0", m.current_std_dev_pct == 0.0,
+          f"got {m.current_std_dev_pct}")
+    check("sigma reset to 0", m.current_std_dev == 0.0)
+
+
+def test_snapshot_clears_history():
+    print("\n=== Test: snapshot clears price/trade history ===")
+    m = MarketState("DOGEUSDT")
+    m.apply_orderbook({
+        "b": [["0.1", "100"]],
+        "a": [["0.10001", "100"]],
+    }, is_snapshot=True)
+
+    # Заполняем историю
+    base = time.time() - 70
+    for i in range(60):
+        m.best_bid = 0.1 + (i % 3) * 0.00001
+        m.best_ask = 0.10001 + (i % 3) * 0.00001
+        m.update_sigma(base + i)
+    m.add_trades([{"S": "Buy", "v": "100"}], time.time())
+
+    check("history before snapshot not empty", len(m.price_history) > 0)
+    check("trades before snapshot not empty", len(m.trade_history) > 0)
+    check("sigma before snapshot > 0", m.current_std_dev_pct > 0)
+
+    # Новый snapshot
+    m.apply_orderbook({
+        "b": [["0.2", "500"]],
+        "a": [["0.20001", "500"]],
+    }, is_snapshot=True)
+
+    check("price_history cleared", len(m.price_history) == 0)
+    check("trade_history cleared", len(m.trade_history) == 0)
+    check("sigma_pct cleared", m.current_std_dev_pct == 0.0)
+    check("std_dev cleared", m.current_std_dev == 0.0)
+    check("bids replaced", 0.1 not in m.bids and 0.2 in m.bids)
 if __name__ == "__main__":
     print("=" * 60)
     print("MarketState unit tests")
@@ -173,8 +233,16 @@ if __name__ == "__main__":
     test_sigma_insufficient_data()
     test_trades_window()
     test_tick_readiness()
+    test_sigma_resets_on_insufficient_samples()
+    test_snapshot_clears_history()
 
     print("\n" + "=" * 60)
     print(f"RESULT: {PASSED} passed, {FAILED} failed")
     print("=" * 60)
     sys.exit(0 if FAILED == 0 else 1)
+
+
+# ============================================================
+# Regression tests for market.py patches (27.09)
+# ============================================================
+
