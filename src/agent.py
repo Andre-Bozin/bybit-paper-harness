@@ -6,7 +6,7 @@ agent.py — торговый агент.
 import json
 import time
 import logging
-from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 from src import config, strategies
 from src.session import PaperSession
@@ -18,7 +18,6 @@ def _setup_agent_logger(name: str) -> logging.Logger:
     lg.setLevel(logging.INFO)
     if lg.handlers:
         lg.handlers.clear()
-    from logging.handlers import RotatingFileHandler
     h = RotatingFileHandler(
         config.LOGS_DIR / f"trade_{name}.log",
         maxBytes=10 * 1024 * 1024, backupCount=7,
@@ -31,6 +30,15 @@ def _setup_agent_logger(name: str) -> logging.Logger:
 
 class Agent:
     """Торговый агент. Один экземпляр на конфиг агента."""
+
+    # Классовые константы (могут быть переопределены из cfg)
+    DEFAULT_ORDER_COOLDOWN = 2.0       # секунды между однотипными PLACE
+    TP_MARGIN_BASE_PCT = 0.05          # базовый % TP
+    TP_MARGIN_SIGMA_MULT = 3.0         # TP = base + mult * sigma_pct
+    TP_MARGIN_MIN_PCT = 0.15           # нижняя граница TP %
+    TP_MARGIN_MAX_PCT = 0.75           # верхняя граница TP %
+    DECAY_EXIT_MIN_PCT = 0.02          # decay exit когда margin_pct < 0.02%
+    AMEND_TP_MIN_REL = 0.0001          # 0.01% — порог для переставления TP
 
     def __init__(self, cfg: dict, market, session: PaperSession):
         self.name = cfg["name"]
@@ -66,7 +74,9 @@ class Agent:
         self.sl_until = 0.0         # cooldown после SL
         self._last_placed_side = None
         self._last_side_change = 0.0
-        self._order_place_cooldown = 2.0  # не переставлять чаще 2s
+        self._order_place_cooldown = float(
+            cfg.get("order_cooldown", self.DEFAULT_ORDER_COOLDOWN)
+        )
         # Значения сигнала на момент решения (PLACE). Используются в ENTRY.
         self._place_sigma_pct = 0.0
         self._place_obi = 0.0
@@ -104,6 +114,9 @@ class Agent:
                 self.session.cancel(self.active_oid)
                 self.active_oid = None
                 self._last_placed_side = None
+                # Сбрасываем сигнал, чтобы _on_entry не прочитал устаревшие значения
+                self._place_sigma_pct = 0.0
+                self._place_obi = 0.0
         if side is None:
             return
         if self.active_oid is not None:
@@ -135,6 +148,7 @@ class Agent:
         pos = self.session.position
         return {
             "name": self.name,
+            "symbol": self.session.symbol,
             "strategy": self.strategy,
             "usdt": round(self.session.usdt, 4),
             "position_side": pos["side"] or "flat",
@@ -152,6 +166,7 @@ class Agent:
         pos = self.session.position
         self._log({
             "event": "FINAL_SNAPSHOT",
+            "symbol": self.session.symbol,
             "usdt": round(self.session.usdt, 6),
             "position_size": pos["size"],
             "position_side": pos["side"] or "",
@@ -213,7 +228,7 @@ class Agent:
             self._on_close(now)
             return
 
-        elapsed = now - self.entry_time
+        elapsed = max(0.0, now - self.entry_time)
 
         # --- Fast SL ---
         if self.sl_price > 0:
@@ -224,7 +239,13 @@ class Agent:
             if hit:
                 exit_side = "Sell" if self.position_side == "Buy" else "Buy"
                 self.session.cancel_all()
-                self.session.place_market(exit_side, self.qty, reduce_only=True)
+                ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
+                if not ok:
+                    # Стакан пустой (best_bid/ask = 0) или qty отвалился.
+                    # Не сбрасываем состояние — попробуем на следующем тике.
+                    self._log({"event": "CLOSE_FAILED", "reason": "stop_loss",
+                               "sl": self.sl_price, "elapsed": elapsed})
+                    return
                 self._log({"event": "STOP_LOSS", "sl": self.sl_price,
                            "elapsed": elapsed})
                 self._reset()
@@ -235,7 +256,11 @@ class Agent:
         if elapsed > self.hard_kill:
             exit_side = "Sell" if self.position_side == "Buy" else "Buy"
             self.session.cancel_all()
-            self.session.place_market(exit_side, self.qty, reduce_only=True)
+            ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
+            if not ok:
+                self._log({"event": "CLOSE_FAILED", "reason": "hard_kill",
+                           "elapsed": elapsed})
+                return
             self._log({"event": "HARD_KILL", "elapsed": elapsed})
             self._reset()
             return
@@ -248,10 +273,14 @@ class Agent:
 
             # Decay exit fires when remaining margin < 0.02% of price.
             # (Previously was absolute "< 1.0 USDT" — broke all non-BTC symbols.)
-            if new_margin_pct < 0.02:
+            if new_margin_pct < self.DECAY_EXIT_MIN_PCT:
                 exit_side = "Sell" if self.position_side == "Buy" else "Buy"
                 self.session.cancel_all()
-                self.session.place_market(exit_side, self.qty, reduce_only=True)
+                ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
+                if not ok:
+                    self._log({"event": "CLOSE_FAILED", "reason": "decay_exit",
+                               "elapsed": elapsed, "margin_pct": new_margin_pct})
+                    return
                 self._log({"event": "DECAY_EXIT", "elapsed": elapsed,
                            "margin_pct": new_margin_pct})
                 self._reset()
@@ -265,8 +294,7 @@ class Agent:
                 new_tp = self.entry_price - new_margin
 
             # Amend TP only if change is significant relative to price.
-            # Previous absolute "< 1.0 USDT" broke all non-BTC symbols.
-            amend_threshold = self.entry_price * 0.0001  # 0.01% of price
+            amend_threshold = self.entry_price * self.AMEND_TP_MIN_REL
             if abs(new_tp - self.current_tp) >= amend_threshold:
                 if self.tp_oid is not None:
                     self.session.cancel(self.tp_oid)
@@ -293,25 +321,39 @@ class Agent:
     # --- Helpers ---
 
     def _tp_margin_pct(self) -> float:
-        """Динамический TP-margin в % от цены. Зависит от σ%. """
-        m = 0.05 + 3.0 * self.market.current_std_dev_pct
-        return max(0.15, min(0.75, m))
+        """
+        Динамический TP-margin в % от цены. Зависит от σ%.
+        TP% = clamp(BASE + SIGMA_MULT * sigma_pct, MIN, MAX).
+        """
+        m = self.TP_MARGIN_BASE_PCT + self.TP_MARGIN_SIGMA_MULT * self.market.current_std_dev_pct
+        return max(self.TP_MARGIN_MIN_PCT, min(self.TP_MARGIN_MAX_PCT, m))
 
     def _evaluate_signal(self, now: float):
-        """Вызов стратегии с правильными kwargs."""
-        if self.strategy in ("fade_obi", "direct_obi"):
-            return strategies.evaluate(
-                self.strategy, self.market, now,
-                obi_threshold=self.obi_threshold,
-            )
-        elif self.strategy in ("momentum_10s", "momentum_60s",
-                               "meanrev_10s", "meanrev_60s"):
-            return strategies.evaluate(
-                self.strategy, self.market, now,
-                threshold_mult=0.25,
-            )
-        else:
-            raise ValueError(f"Unknown strategy: {self.strategy}")
+        """
+        Вызов стратегии с правильными kwargs.
+        Возвращает "Buy" | "Sell" | None.
+        При неизвестной стратегии — None + запись в лог (не валит harness).
+        """
+        try:
+            if self.strategy in ("fade_obi", "direct_obi"):
+                return strategies.evaluate(
+                    self.strategy, self.market, now,
+                    obi_threshold=self.obi_threshold,
+                )
+            elif self.strategy in ("momentum_10s", "momentum_60s",
+                                   "meanrev_10s", "meanrev_60s"):
+                return strategies.evaluate(
+                    self.strategy, self.market, now,
+                    threshold_mult=0.25,
+                )
+            else:
+                self._log({"event": "UNKNOWN_STRATEGY",
+                           "strategy": self.strategy})
+                return None
+        except ValueError as e:
+            self._log({"event": "SIGNAL_ERROR",
+                       "strategy": self.strategy, "reason": str(e)})
+            return None
 
     def _reset(self) -> None:
         self.position_open = False

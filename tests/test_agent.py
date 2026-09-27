@@ -301,6 +301,91 @@ def test_place_signal_reset_after_close():
     check("place_obi reset", agent._place_obi == 0.0)
 
 
+def test_close_failed_keeps_state():
+    print("\n=== Test: place_market fail doesn't reset agent state ===")
+    agent, market, session = make_agent(obi=-0.7)
+    now = time.time()
+    agent.on_tick(now)
+    # Fill entry
+    market.best_bid = 0.09999
+    market.best_ask = 0.1
+    now += 0.1
+    agent.on_tick(now)
+    check("position opened", agent.position_open)
+
+    saved_sl = agent.sl_price
+
+    # Обнуляем рынок — стакан пустой.
+    # on_tick() сделает session.update_market(0, 0), затем SL сработает
+    # (0 <= sl_price), но place_market вернёт False (price=0).
+    market.best_bid = 0.0
+    market.best_ask = 0.0
+
+    now += 1
+    agent.on_tick(now)
+
+    # position_open должен остаться True, состояние НЕ сброшено
+    check("position_open preserved after failed close",
+          agent.position_open is True,
+          f"got position_open={agent.position_open}")
+    check("sl_price preserved", agent.sl_price == saved_sl,
+          f"got {agent.sl_price} != {saved_sl}")
+
+
+def test_unknown_strategy_returns_none():
+    print("\n=== Test: unknown strategy returns None (no raise) ===")
+    agent, market, session = make_agent(obi=-0.7)
+    agent.strategy = "nonexistent_strategy"
+    now = time.time()
+
+    # on_tick НЕ должен упасть
+    try:
+        agent.on_tick(now)
+        check("on_tick did not raise", True)
+    except Exception as e:
+        check("on_tick did not raise", False, f"got {e}")
+
+    # Никаких ордеров не создалось
+    check("no order created", agent.active_oid is None)
+
+
+def test_signal_error_returns_none():
+    print("\n=== Test: strategy ValueError handled gracefully ===")
+    agent, market, session = make_agent(obi=-0.7)
+    # Устанавливаем битый threshold — strategy raise ValueError
+    agent.obi_threshold = 1.5  # out of (0, 1)
+    now = time.time()
+
+    try:
+        agent.on_tick(now)
+        check("on_tick survived bad obi_threshold", True)
+    except Exception as e:
+        check("on_tick survived bad obi_threshold", False, f"got {e}")
+
+    check("no order created", agent.active_oid is None)
+
+
+def test_snapshot_includes_symbol():
+    print("\n=== Test: agent snapshot includes symbol ===")
+    agent, market, session = make_agent(obi=-0.7)
+    snap = agent.snapshot()
+    check("snapshot has symbol", snap.get("symbol") == "DOGEUSDT")
+
+
+def test_order_cooldown_from_cfg():
+    print("\n=== Test: order_cooldown read from cfg ===")
+    agent, market, session = make_agent(
+        obi=-0.7,
+        cfg_overrides={"order_cooldown": 5.5}
+    )
+    check("order_cooldown from cfg",
+          abs(agent._order_place_cooldown - 5.5) < 1e-9,
+          f"got {agent._order_place_cooldown}")
+
+    # Default если не указан
+    agent2, _, _ = make_agent(obi=-0.7)
+    check("order_cooldown default 2.0",
+          abs(agent2._order_place_cooldown - 2.0) < 1e-9)
 if __name__ == "__main__":
     print("=" * 60)
     print("Agent unit tests")
@@ -319,8 +404,19 @@ if __name__ == "__main__":
     test_snapshot()
     test_entry_uses_place_time_signal()
     test_place_signal_reset_after_close()
+    test_close_failed_keeps_state()
+    test_unknown_strategy_returns_none()
+    test_signal_error_returns_none()
+    test_snapshot_includes_symbol()
+    test_order_cooldown_from_cfg()
 
     print("\n" + "=" * 60)
     print(f"RESULT: {PASSED} passed, {FAILED} failed")
     print("=" * 60)
     sys.exit(0 if FAILED == 0 else 1)
+
+
+# ============================================================
+# Regression tests for agent.py patches (27.09)
+# ============================================================
+
