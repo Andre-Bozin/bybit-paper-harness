@@ -3,7 +3,7 @@
     "created": "2026-09-22",
     "duration_days": 7,
     "symbol": "DOGEUSDT",
-    "start_balance": 3.4813,
+    "start_balance": 1000.0,
     "note": "v3: % formulas, DOGEUSDT, min_std_dev in %"
   },
   "agents": [
