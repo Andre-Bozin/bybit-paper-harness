@@ -168,6 +168,80 @@ def test_snapshot():
     check("snapshot has position_size 0", snap["position_size"] == 0.0)
 
 
+def test_validate_side():
+    print("\n=== Test: _validate rejects invalid side ===")
+    s = PaperSession("test_side", DOGE, 1000.0)
+    for bad_side in ("HOLD", "BUY", "sell", "", None, 123):
+        try:
+            s.place_limit(bad_side, 0.1, 100)
+            check(f"rejects side={bad_side!r}", False)
+        except ValueError:
+            check(f"rejects side={bad_side!r}", True)
+
+
+def test_validate_price():
+    print("\n=== Test: _validate rejects non-positive price ===")
+    s = PaperSession("test_price", DOGE, 1000.0)
+    for bad_price in (0, -1, -0.1):
+        try:
+            s.place_limit("Buy", bad_price, 100)
+            check(f"rejects price={bad_price}", False)
+        except ValueError:
+            check(f"rejects price={bad_price}", True)
+
+
+def test_validate_qty():
+    print("\n=== Test: _validate rejects non-positive qty ===")
+    s = PaperSession("test_qty", DOGE, 1000.0)
+    for bad_qty in (0, -1, -100):
+        try:
+            s.place_limit("Buy", 0.1, bad_qty)
+            check(f"rejects qty={bad_qty}", False)
+        except ValueError:
+            check(f"rejects qty={bad_qty}", True)
+
+
+def test_market_no_open_with_existing_position():
+    print("\n=== Test: place_market(reduce_only=False) raises on open position ===")
+    s = PaperSession("test_no_open", DOGE, 1000.0)
+    s.update_market(0.1, 0.10001)
+    # Open position via limit
+    s.place_limit("Buy", 0.1, 100)
+    s.update_market(0.09999, 0.1)
+    assert s.position["size"] == 100.0
+
+    # Attempt to open new via market → should raise (caught in place_market → False)
+    ok = s.place_market("Buy", 50, reduce_only=False)
+    check("returns False on open position", ok is False)
+    check("position unchanged", s.position["size"] == 100.0)
+
+
+def test_fill_truncates_oversized_order():
+    print("\n=== Test: oversized SELL truncated to position size ===")
+    s = PaperSession("test_trunc", DOGE, 1000.0)
+    s.update_market(0.1, 0.10001)
+    s.place_limit("Buy", 0.1, 100)
+    s.update_market(0.09999, 0.1)  # fill buy
+    assert s.position["size"] == 100.0
+
+    # Place SELL for 200 (больше позиции) — ордер создан, но fill должен truncate до 100
+    s.place_limit("Sell", 0.1, 200)
+    s.update_market(0.1, 0.10001)  # price at 0.1 → touch fill
+
+    check("position closed fully", s.position["size"] == 0.0)
+    check("no orders left", len(s.orders) == 0)
+
+
+def test_snapshot_includes_symbol():
+    print("\n=== Test: snapshot includes symbol ===")
+    s = PaperSession("test_sym", DOGE, 1000.0)
+    snap = s.snapshot()
+    check("snapshot has symbol", snap.get("symbol") == "DOGEUSDT")
+
+
+# ============================================================
+# Regression tests for validation patches (27.09)
+# ============================================================
 if __name__ == "__main__":
     print("=" * 60)
     print("PaperSession unit tests")
@@ -179,8 +253,20 @@ if __name__ == "__main__":
     test_close_pnl_loss()
     test_market_close()
     test_snapshot()
+    test_validate_side()
+    test_validate_price()
+    test_validate_qty()
+    test_market_no_open_with_existing_position()
+    test_fill_truncates_oversized_order()
+    test_snapshot_includes_symbol()
 
     print("\n" + "=" * 60)
     print(f"RESULT: {PASSED} passed, {FAILED} failed")
     print("=" * 60)
     sys.exit(0 if FAILED == 0 else 1)
+
+
+# ============================================================
+# Regression tests for validation patches (27.09)
+# ============================================================
+
