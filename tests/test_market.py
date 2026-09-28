@@ -134,23 +134,6 @@ def test_sigma_insufficient_data():
     check("sigma stays 0 with <50 samples", m.current_std_dev == 0.0)
 
 
-def test_trades_window():
-    print("\n=== Test: trades trimmed by window ===")
-    m = MarketState("DOGEUSDT")
-    now = time.time()
-    trades = [{"S": "Buy", "v": "100"}, {"S": "Sell", "v": "50"}]
-    m.add_trades(trades, now - 5)  # old
-    m.add_trades(trades, now)      # fresh
-
-    check("has 4 trades before trim", len(m.trade_history) == 4)
-    # TRADE_WINDOW = 10s, old at now-5 is still within
-    # Add more trades to trigger trim
-    m.add_trades([{"S": "Buy", "v": "1"}], now + 10)  # cutoff = now
-    # old trades at now-5 should be gone
-    remaining = len(m.trade_history)
-    check("old trades trimmed", remaining <= 3, f"got {remaining}")
-
-
 def test_tick_readiness():
     print("\n=== Test: tick returns False on empty book ===")
     m = MarketState("DOGEUSDT")
@@ -190,23 +173,21 @@ def test_sigma_resets_on_insufficient_samples():
 
 
 def test_snapshot_clears_history():
-    print("\n=== Test: snapshot clears price/trade history ===")
+    print("\n=== Test: snapshot clears price history ===")
     m = MarketState("DOGEUSDT")
     m.apply_orderbook({
         "b": [["0.1", "100"]],
         "a": [["0.10001", "100"]],
     }, is_snapshot=True)
 
-    # Заполняем историю
+    # Заполняем price_history
     base = time.time() - 70
     for i in range(60):
         m.best_bid = 0.1 + (i % 3) * 0.00001
         m.best_ask = 0.10001 + (i % 3) * 0.00001
         m.update_sigma(base + i)
-    m.add_trades([{"S": "Buy", "v": "100"}], time.time())
 
     check("history before snapshot not empty", len(m.price_history) > 0)
-    check("trades before snapshot not empty", len(m.trade_history) > 0)
     check("sigma before snapshot > 0", m.current_std_dev_pct > 0)
 
     # Новый snapshot
@@ -216,7 +197,6 @@ def test_snapshot_clears_history():
     }, is_snapshot=True)
 
     check("price_history cleared", len(m.price_history) == 0)
-    check("trade_history cleared", len(m.trade_history) == 0)
     check("sigma_pct cleared", m.current_std_dev_pct == 0.0)
     check("std_dev cleared", m.current_std_dev == 0.0)
     check("bids replaced", 0.1 not in m.bids and 0.2 in m.bids)
@@ -231,7 +211,6 @@ if __name__ == "__main__":
     test_obi_top10_only()
     test_sigma_pct()
     test_sigma_insufficient_data()
-    test_trades_window()
     test_tick_readiness()
     test_sigma_resets_on_insufficient_samples()
     test_snapshot_clears_history()
