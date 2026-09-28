@@ -25,6 +25,56 @@ Backtests look great with idealized fills. Real fills are worse, delays matter, 
 - No risk — nothing is sent to the exchange
 
 ---
+---
+
+## Fees & Applicability
+
+**Bybit retail fees are higher than most backtests assume.**
+
+For a typical retail account (as of 2026):
+
+| Tier | Maker | Taker |
+|---|---|---|
+| **Standard retail** | **0.036%** | **0.100%** |
+| VIP0 | 0.020% | 0.055% |
+| VIP1+ | 0.018% | 0.050% |
+
+If you have `BYBIT_API_KEY` in `.env`, the harness fetches your actual fees per symbol via `/v5/account/fee-rate`. Otherwise it uses realistic defaults (0.00036 / 0.001).
+
+### The applicability rule
+
+A symbol is only tradeable when the natural movement over the strategy's hold window exceeds round-trip fees by a margin:
+
+   3 x sigma_pct(60s)  >  fee_round_trip_pct  x  1.5
+
+Otherwise fees dominate gross PnL — **no signal can overcome them**.
+
+### Empirical results (2026-09-27, 19h paper run)
+
+| Symbol | sigma_pct(60s) | sigma_pct x 3 | Real fee RT | Ratio | Verdict |
+|---|---|---|---|---|---|
+| **DOGEUSDT** | 0.078% | 0.234% | 0.136% | 1.7x | marginal |
+| **BTCUSDT** | 0.0076% | 0.023% | 0.136% | 0.17x | unviable |
+| **ETHUSDT** | 0.0048% | 0.014% | 0.136% | 0.10x | unviable |
+
+**Full experiment:** 12 agents x 3 symbols x 19 hours = **1293 trades**.
+
+- **BTC/ETH:** 85% of exits via time-decay (TP never reached — fee > any realistic move).
+- **DOGE:** 50% decay exits, still net negative.
+- **Conclusion:** at retail fee tiers, tick-level scalping on Bybit is structurally unprofitable — regardless of signal quality.
+
+### What this means for you
+
+This harness is a **measurement tool**, not a profitable strategy. Its purpose is to show you the boundary where retail algos stop working — before real money does.
+
+Use it to:
+- Test whether your signal has an edge after fees on your symbol.
+- Find symbols where 3 x sigma_pct > fee_rt x 1.5 holds.
+- Quantify fee bleed before deploying capital.
+
+Do **not** expect it to print money on BTCUSDT at 0.1% taker fees. It won't. That's the point.
+
+---
 
 ## Features
 
