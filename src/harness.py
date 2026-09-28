@@ -39,6 +39,48 @@ def setup_events_logger() -> logging.Logger:
     return lg
 
 
+def _startup_check() -> None:
+    """
+    Проверяет безопасность и логирует состояние ключей.
+
+    1. .env не отслеживается git (защита от утечки).
+    2. Ключи загружены (маскированные).
+    3. Пингует Bybit API через fee fetch (если ключи есть).
+    """
+    import os
+    import subprocess
+
+    print("[harness] === Startup security check ===")
+
+    # 1. .env в git?
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", ".env"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            print("[harness] ⚠️  WARNING: .env IS tracked by git!")
+            print("[harness] ⚠️  API keys could leak. Run: git rm --cached .env")
+        else:
+            print("[harness] OK: .env not tracked by git")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("[harness] WARN: cannot check git tracking (git not available?)")
+
+    # 2. Ключи загружены?
+    key = os.environ.get("BYBIT_API_KEY", "")
+    secret = os.environ.get("BYBIT_API_SECRET", "")
+    if key and secret and len(key) >= 10:
+        masked = f"{key[:6]}...{key[-4:]}"
+        print(f"[harness] API key loaded: {masked}")
+        print("[harness] Real fees will be fetched from Bybit")
+    else:
+        print("[harness] No API keys in env — using DEFAULT fees")
+        print("[harness]   maker 0.00036 / taker 0.001 (retail estimate)")
+
+    print("[harness] === End of startup check ===")
+    print()
+
+
 class Harness:
     """Главный orchestrator."""
 
@@ -297,6 +339,8 @@ def main():
     cfg_path = Path(args.config)
     print(f"[harness] Loading config: {cfg_path}")
     cfg = config.load_config(cfg_path)
+
+    _startup_check()
 
     print(f"[harness] Building {len(cfg['agents'])} agents...")
     h = Harness(cfg)

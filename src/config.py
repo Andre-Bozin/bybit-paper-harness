@@ -3,10 +3,18 @@ config.py — конфигурация проекта.
 Единая точка для путей, загрузки конфига, defaults.
 """
 import json
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # --- Project paths ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Загружаем .env автоматически (если файл существует).
+# Ключи попадают в os.environ → используются metadata.resolve_fees().
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 SRC_DIR = PROJECT_ROOT / "src"
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -18,8 +26,12 @@ for d in (LOGS_DIR, REPORTS_DIR, CACHE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # --- Defaults ---
-DEFAULT_MAKER_FEE = 0.0002
-DEFAULT_TAKER_FEE = 0.00055
+HTTP_TIMEOUT = 10.0
+CACHE_VERSION = "v1"     # bump при изменении структуры кэша
+# Realistic retail defaults (Bybit standard tier, 2026).
+# If BYBIT_API_KEY/SECRET in env — actual fees are fetched per symbol.
+DEFAULT_MAKER_FEE = 0.00036
+DEFAULT_TAKER_FEE = 0.001
 DEFAULT_CATEGORY = "linear"  # linear perps
 METADATA_CACHE_TTL = 86400   # 24h
 FEES_CACHE_TTL = 3600        # 1h

@@ -3,17 +3,36 @@ metadata.py — загрузка спецификаций инструмента
 Кэширует ответы, чтобы не дёргать API при каждом запуске.
 """
 import json
+import os
 import time
 from pathlib import Path
 from urllib.request import urlopen
 from urllib.parse import urlencode
 
+from pybit.unified_trading import HTTP
+
 from src import config
 
 
 def _fetch_json(url: str) -> dict:
-    with urlopen(url, timeout=10) as r:
+    with urlopen(url, timeout=config.HTTP_TIMEOUT) as r:
         return json.loads(r.read())
+
+
+def _mask(s: str) -> str:
+    """Маскирует секрет для безопасного логирования. tYKsc3...WYG5"""
+    if not s or len(s) < 10:
+        return "***"
+    return f"{s[:6]}...{s[-4:]}"
+
+
+def _sanitize_error(msg: str, *secrets: str) -> str:
+    """Заменяет все вхождения секретов в строке на маскированные версии."""
+    result = str(msg)
+    for s in secrets:
+        if s and len(s) >= 10:
+            result = result.replace(s, _mask(s))
+    return result
 
 
 def _cache_path(name: str) -> Path:
@@ -21,6 +40,7 @@ def _cache_path(name: str) -> Path:
 
 
 def _load_cache(name: str, ttl: int):
+    """Читает кэш. Возвращает dict без служебного поля _cached_at."""
     p = _cache_path(name)
     if not p.exists():
         return None
@@ -30,14 +50,21 @@ def _load_cache(name: str, ttl: int):
         return None
     if time.time() - data.get("_cached_at", 0) > ttl:
         return None
+    # Убираем служебное поле — не выходит за пределы модуля
+    data.pop("_cached_at", None)
     return data
 
 
 def _save_cache(name: str, data: dict) -> None:
-    data["_cached_at"] = time.time()
-    _cache_path(name).write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    """Atomic write кэша. Не мутирует входной dict."""
+    payload = {**data, "_cached_at": time.time()}
+    path = _cache_path(name)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    # Атомарная замена (POSIX rename atomic)
+    os.replace(tmp, path)
 
 
 def fetch_instrument_info(symbol: str, category: str = "linear") -> dict:
@@ -45,7 +72,7 @@ def fetch_instrument_info(symbol: str, category: str = "linear") -> dict:
     Возвращает {tick_size, qty_step, min_qty, min_notional, base_precision}.
     Кэш 24 часа.
     """
-    cache_name = f"instrument_{category}_{symbol}"
+    cache_name = f"instrument_{config.CACHE_VERSION}_{category}_{symbol}"
     cached = _load_cache(cache_name, config.METADATA_CACHE_TTL)
     if cached:
         return cached
@@ -77,27 +104,30 @@ def fetch_instrument_info(symbol: str, category: str = "linear") -> dict:
         "qty_step": float(lot["qtyStep"]),
         "min_qty": float(lot["minOrderQty"]),
         "min_notional": min_notional,
-        "base_precision": lot.get("basePrecision"),
-        "quote_precision": lot.get("quotePrecision"),
     }
     _save_cache(cache_name, info)
     return info
 
 
 def fetch_fees(api_key: str, api_secret: str, symbol: str,
-               category: str = "linear") -> dict:
+               category: str = "linear") -> dict | None:
     """
-    Возвращает {maker_fee, taker_fee} для аккаунта.
-    Требует API-ключи. Кэш 1 час. Если недоступно — fallback на defaults.
+    Возвращает {maker_fee, taker_fee} для аккаунта или None при ошибке.
+    Требует API-ключи. Кэш 1 час.
+
+    НЕ возвращает defaults — этим занимается resolve_fees().
+    Это позволяет вызывающей стороне различать "API ответил defaults"
+    и "API не ответил, fallback на defaults".
     """
-    cache_name = f"fees_{category}_{symbol}"
+    if not api_key or not api_secret:
+        return None
+
+    cache_name = f"fees_{config.CACHE_VERSION}_{category}_{symbol}"
     cached = _load_cache(cache_name, config.FEES_CACHE_TTL)
     if cached:
         return cached
 
     try:
-        # Lazy import — pybit не обязателен если ключей нет
-        from pybit.unified_trading import HTTP
         session = HTTP(
             testnet=False, demo=False,
             api_key=api_key, api_secret=api_secret,
@@ -114,31 +144,49 @@ def fetch_fees(api_key: str, api_secret: str, symbol: str,
         _save_cache(cache_name, fees)
         return fees
     except Exception as e:
-        # Fallback на defaults с предупреждением
-        print(f"[metadata] fee fetch failed ({e}), using defaults")
-        return {
-            "maker_fee": config.DEFAULT_MAKER_FEE,
-            "taker_fee": config.DEFAULT_TAKER_FEE,
-        }
+        safe_msg = _sanitize_error(str(e), api_key, api_secret)
+        print(f"[metadata] fee fetch failed for {symbol}: {safe_msg}")
+        return None
+
+
+def resolve_fees(symbol: str, category: str = "linear",
+                 maker_fee: float = None, taker_fee: float = None) -> dict:
+    """
+    Определяет maker/taker fees для символа с приоритетом:
+      1. Явный override (аргументы maker_fee/taker_fee)
+      2. fetch_fees из Bybit API (если BYBIT_API_KEY/SECRET в env)
+      3. config.DEFAULT_*
+
+    Возвращает {maker_fee, taker_fee}.
+    """
+    if maker_fee is not None and taker_fee is not None:
+        return {"maker_fee": maker_fee, "taker_fee": taker_fee}
+
+    api_key = os.environ.get("BYBIT_API_KEY")
+    api_secret = os.environ.get("BYBIT_API_SECRET")
+    if api_key and api_secret:
+        fetched = fetch_fees(api_key, api_secret, symbol, category)
+        if fetched:
+            # Если только один из override задан — частичное применение
+            if maker_fee is not None:
+                fetched["maker_fee"] = maker_fee
+            if taker_fee is not None:
+                fetched["taker_fee"] = taker_fee
+            return fetched
+
+    return {
+        "maker_fee": maker_fee if maker_fee is not None else config.DEFAULT_MAKER_FEE,
+        "taker_fee": taker_fee if taker_fee is not None else config.DEFAULT_TAKER_FEE,
+    }
 
 
 def get_instrument(symbol: str, category: str = "linear",
                    maker_fee: float = None, taker_fee: float = None) -> dict:
     """
-    Единая точка: instrument + fees.
-    maker_fee/taker_fee из config override'ят fetch.
+    Единая точка: instrument spec + resolved fees.
+
+    Приоритет fees: override → API fetch (если env key) → defaults.
     """
     info = fetch_instrument_info(symbol, category)
-
-    # Если override в config — используем его, иначе defaults
-    if maker_fee is not None:
-        info["maker_fee"] = maker_fee
-    else:
-        info["maker_fee"] = config.DEFAULT_MAKER_FEE
-
-    if taker_fee is not None:
-        info["taker_fee"] = taker_fee
-    else:
-        info["taker_fee"] = config.DEFAULT_TAKER_FEE
-
+    info.update(resolve_fees(symbol, category, maker_fee, taker_fee))
     return info
