@@ -2,19 +2,46 @@
 metadata.py — загрузка спецификаций инструмента и комиссий с Bybit.
 Кэширует ответы, чтобы не дёргать API при каждом запуске.
 """
+from __future__ import annotations
+
 import json
 import os
 import time
 from pathlib import Path
-from urllib.request import urlopen
+from typing import Any, TypedDict
 from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from pybit.unified_trading import HTTP
 
 from src import config
 
 
-def _fetch_json(url: str) -> dict:
+# --- TypedDict structures ---
+
+class Fees(TypedDict):
+    """Maker/Taker fees для аккаунта."""
+    maker_fee: float
+    taker_fee: float
+
+
+class InstrumentInfo(TypedDict):
+    """Спецификация торгового инструмента (без fees)."""
+    symbol: str
+    category: str
+    tick_size: float
+    qty_step: float
+    min_qty: float
+    min_notional: float
+
+
+class InstrumentWithFees(InstrumentInfo):
+    """Instrument info + resolved fees."""
+    maker_fee: float
+    taker_fee: float
+
+
+def _fetch_json(url: str) -> dict[str, Any]:
     with urlopen(url, timeout=config.HTTP_TIMEOUT) as r:
         return json.loads(r.read())
 
@@ -39,7 +66,7 @@ def _cache_path(name: str) -> Path:
     return config.CACHE_DIR / f"{name}.json"
 
 
-def _load_cache(name: str, ttl: int):
+def _load_cache(name: str, ttl: int) -> dict[str, Any] | None:
     """Читает кэш. Возвращает dict без служебного поля _cached_at."""
     p = _cache_path(name)
     if not p.exists():
@@ -55,7 +82,7 @@ def _load_cache(name: str, ttl: int):
     return data
 
 
-def _save_cache(name: str, data: dict) -> None:
+def _save_cache(name: str, data: dict[str, Any]) -> None:
     """Atomic write кэша. Не мутирует входной dict."""
     payload = {**data, "_cached_at": time.time()}
     path = _cache_path(name)
@@ -67,9 +94,12 @@ def _save_cache(name: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
-def fetch_instrument_info(symbol: str, category: str = "linear") -> dict:
+def fetch_instrument_info(
+    symbol: str,
+    category: str = "linear",
+) -> InstrumentInfo:
     """
-    Возвращает {tick_size, qty_step, min_qty, min_notional, base_precision}.
+    Возвращает спецификацию инструмента с Bybit.
     Кэш 24 часа.
     """
     cache_name = f"instrument_{config.CACHE_VERSION}_{category}_{symbol}"
@@ -109,8 +139,12 @@ def fetch_instrument_info(symbol: str, category: str = "linear") -> dict:
     return info
 
 
-def fetch_fees(api_key: str, api_secret: str, symbol: str,
-               category: str = "linear") -> dict | None:
+def fetch_fees(
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    category: str = "linear",
+) -> Fees | None:
     """
     Возвращает {maker_fee, taker_fee} для аккаунта или None при ошибке.
     Требует API-ключи. Кэш 1 час.
@@ -149,8 +183,12 @@ def fetch_fees(api_key: str, api_secret: str, symbol: str,
         return None
 
 
-def resolve_fees(symbol: str, category: str = "linear",
-                 maker_fee: float = None, taker_fee: float = None) -> dict:
+def resolve_fees(
+    symbol: str,
+    category: str = "linear",
+    maker_fee: float | None = None,
+    taker_fee: float | None = None,
+) -> Fees:
     """
     Определяет maker/taker fees для символа с приоритетом:
       1. Явный override (аргументы maker_fee/taker_fee)
@@ -180,8 +218,12 @@ def resolve_fees(symbol: str, category: str = "linear",
     }
 
 
-def get_instrument(symbol: str, category: str = "linear",
-                   maker_fee: float = None, taker_fee: float = None) -> dict:
+def get_instrument(
+    symbol: str,
+    category: str = "linear",
+    maker_fee: float | None = None,
+    taker_fee: float | None = None,
+) -> InstrumentWithFees:
     """
     Единая точка: instrument spec + resolved fees.
 

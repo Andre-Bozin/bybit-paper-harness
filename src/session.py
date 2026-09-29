@@ -3,12 +3,51 @@ session.py — PaperSession.
 Симуляция биржи: держит баланс, ордера, позицию.
 Валидирует ордера по metadata (tick_size, qty_step, min_notional).
 """
+from __future__ import annotations
+
 import json
-import time
 import logging
+import time
 from logging.handlers import RotatingFileHandler
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from src import config
+
+if TYPE_CHECKING:
+    from src.metadata import InstrumentWithFees
+
+
+# --- Type aliases ---
+Side = Literal["Buy", "Sell"]
+
+
+# --- TypedDict structures ---
+
+class Position(TypedDict):
+    """Позиция агента. Пустая = size=0, side=''."""
+    size: float
+    side: str       # "Buy" | "Sell" | "" (empty = flat)
+    avgPrice: float
+
+
+class Order(TypedDict):
+    """Активный лимитный ордер."""
+    side: Side
+    price: float
+    qty: float
+    type: str
+    was_at_best: bool
+
+
+class SessionSnapshot(TypedDict):
+    """Публичный snapshot состояния сессии."""
+    name: str
+    symbol: str
+    usdt: float
+    position_size: float
+    position_side: str
+    avg_price: float
+    open_orders: int
 
 
 def _setup_agent_logger(name: str) -> logging.Logger:
@@ -47,7 +86,12 @@ class PaperSession:
 
     Принимает instrument metadata — не хардкодит ни qty, ни fees, ни symbol.
     """
-    def __init__(self, name: str, instrument: dict, start_usdt: float):
+    def __init__(
+        self,
+        name: str,
+        instrument: InstrumentWithFees,
+        start_usdt: float,
+    ) -> None:
         self.name = name
         self.symbol = instrument["symbol"]
         self.tick_size = instrument["tick_size"]
@@ -57,14 +101,14 @@ class PaperSession:
         self.maker_fee = instrument["maker_fee"]
         self.taker_fee = instrument["taker_fee"]
 
-        self.usdt = float(start_usdt)
-        self.orders = {}
-        self.position = {"size": 0.0, "side": "", "avgPrice": 0.0}
-        self.best_bid = 0.0
-        self.best_ask = 0.0
+        self.usdt: float = float(start_usdt)
+        self.orders: dict[str, Order] = {}
+        self.position: Position = {"size": 0.0, "side": "", "avgPrice": 0.0}
+        self.best_bid: float = 0.0
+        self.best_ask: float = 0.0
 
-        self._next_id = 0
-        self.log = _setup_agent_logger(name)
+        self._next_id: int = 0
+        self.log: logging.Logger = _setup_agent_logger(name)
 
     # --- Order placement ---
 
@@ -80,7 +124,12 @@ class PaperSession:
         """Округляет qty к qty_step."""
         return round(round(qty / self.qty_step) * self.qty_step, 10)
 
-    def _validate(self, side: str, price: float, qty: float) -> tuple:
+    def _validate(
+        self,
+        side: Side,
+        price: float,
+        qty: float,
+    ) -> tuple[float, float]:
         """Валидирует side/price/qty и округляет к tick_size/qty_step.
         Поднимает ValueError при невалидных параметрах."""
         if side not in ("Buy", "Sell"):
@@ -101,7 +150,7 @@ class PaperSession:
             raise ValueError(f"notional {price*qty} < min_notional {self.min_notional}")
         return price, qty
 
-    def place_limit(self, side: str, price: float, qty: float) -> str:
+    def place_limit(self, side: Side, price: float, qty: float) -> str:
         """Ставит лимитный ордер. Возвращает order_id."""
         price, qty = self._validate(side, price, qty)
         oid = self._gen_id()
@@ -129,7 +178,12 @@ class PaperSession:
         self.orders.clear()
         return n
 
-    def place_market(self, side: str, qty: float, reduce_only: bool = False) -> bool:
+    def place_market(
+        self,
+        side: Side,
+        qty: float,
+        reduce_only: bool = False,
+    ) -> bool:
         """Market-ордер. Возвращает True если исполнен, False при no-op."""
         if side not in ("Buy", "Sell"):
             return False
@@ -186,7 +240,7 @@ class PaperSession:
                 elif was_at_best and 0 < self.best_ask > price:
                     self._fill_limit(oid, o, price)
 
-    def _fill_limit(self, oid: str, order: dict, price: float) -> None:
+    def _fill_limit(self, oid: str, order: Order, price: float) -> None:
         """
         Исполняет лимитный ордер по указанной цене.
         Различает три случая: OPEN (нет позиции), ADD (усреднение),
@@ -236,7 +290,13 @@ class PaperSession:
 
         del self.orders[oid]
 
-    def _execute_market(self, side: str, qty: float, price: float, reduce_only: bool) -> None:
+    def _execute_market(
+        self,
+        side: Side,
+        qty: float,
+        price: float,
+        reduce_only: bool,
+    ) -> None:
         """
         Market-исполнение. Taker fee.
         - reduce_only=True: закрыть/уменьшить позицию. No-op если нечего закрывать.
@@ -284,7 +344,7 @@ class PaperSession:
 
     # --- Logging ---
 
-    def _emit(self, event: dict) -> None:
+    def _emit(self, event: dict[str, Any]) -> None:
         event["ts"] = time.time()
         self.log.info(json.dumps(event, ensure_ascii=False))
         side = event.get("side", "")
@@ -299,7 +359,7 @@ class PaperSession:
 
     # --- Info ---
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> SessionSnapshot:
         """Текущее состояние сессии."""
         return {
             "name": self.name,

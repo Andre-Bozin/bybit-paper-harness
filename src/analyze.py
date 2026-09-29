@@ -15,14 +15,39 @@ analyze.py — парсер логов harness, генерирует сводн�
     python3 -m src.analyze
     python3 -m src.analyze --config configs/12agents_doge.json
 """
+from __future__ import annotations
+
 import json
 from argparse import ArgumentParser
 from pathlib import Path
+from typing import Any, TypedDict
 
 from src import config
 
 
-def _read_jsonl(path: Path) -> list:
+# --- TypedDict structures ---
+
+class AgentSummary(TypedDict):
+    """Метрики одного агента после парсинга логов."""
+    name: str
+    entries: int
+    closes: int
+    closed_trades: int
+    wins: int
+    losses: int
+    winrate: float
+    sl: int
+    hard_kill: int
+    decay_exit: int
+    close_failed: int
+    place_rejected: int
+    limit_closes: int
+    market_closes: int
+    final_usdt: float | None
+    final_source: str | None
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Читает JSON-lines, пропускает невалидные строки."""
     if not path.exists():
         return []
@@ -38,7 +63,7 @@ def _read_jsonl(path: Path) -> list:
     return events
 
 
-def parse_agent_log(name: str) -> list:
+def parse_agent_log(name: str) -> list[dict[str, Any]]:
     """Объединяет события из trade_<name>.log и agent_<name>.log, сортирует по ts."""
     events = (
         _read_jsonl(config.LOGS_DIR / f"trade_{name}.log") +
@@ -48,11 +73,11 @@ def parse_agent_log(name: str) -> list:
     return events
 
 
-def summarize(name: str, start_usdt: float) -> dict:
+def summarize(name: str, start_usdt: float) -> AgentSummary:
     """Считает метрики по одному агенту."""
-    events = parse_agent_log(name)
+    events: list[dict[str, Any]] = parse_agent_log(name)
 
-    entries = [e for e in events if e.get("event") == "ENTRY"]
+    entries: list[dict[str, Any]] = [e for e in events if e.get("event") == "ENTRY"]
     closes_detected = [e for e in events if e.get("event") == "CLOSE_DETECTED"]
     sl = [e for e in events if e.get("event") == "STOP_LOSS"]
     hk = [e for e in events if e.get("event") == "HARD_KILL"]
@@ -105,12 +130,12 @@ def summarize(name: str, start_usdt: float) -> dict:
     }
 
 
-def build_report(cfg: dict) -> str:
+def build_report(cfg: dict[str, Any]) -> str:
     """Строит текстовый отчёт. Возвращает строку."""
-    start_usdt = float(cfg["meta"].get("start_balance", 1000.0))
-    agents = cfg["agents"]
+    start_usdt: float = float(cfg["meta"].get("start_balance", 1000.0))
+    agents: list[dict[str, Any]] = cfg["agents"]
 
-    lines = []
+    lines: list[str] = []
     lines.append("=" * 130)
     lines.append(
         f"{'Agent':16} {'Symbol':10} {'Ent':>5} {'Cls':>5} {'WR%':>6} "
@@ -128,11 +153,11 @@ def build_report(cfg: dict) -> str:
     total_limit = 0
     total_market = 0
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for a in agents:
-        name = a["name"]
-        symbol = a.get("symbol", "?")
-        s = summarize(name, start_usdt)
+        name: str = a["name"]
+        symbol: str = a.get("symbol", "?")
+        s: AgentSummary = summarize(name, start_usdt)
 
         pnl = (s["final_usdt"] - start_usdt) if s["final_usdt"] is not None else 0.0
         pnl_str = f"{pnl:+.4f}" if s["final_usdt"] is not None else "n/a"
@@ -178,8 +203,8 @@ def build_report(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-def main():
-    parser = ArgumentParser(description="Analyze harness logs")
+def main() -> None:
+    parser: ArgumentParser = ArgumentParser(description="Analyze harness logs")
     parser.add_argument(
         "--config", "-c",
         default=str(config.DEFAULT_CONFIG),

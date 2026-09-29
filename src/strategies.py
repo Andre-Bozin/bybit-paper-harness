@@ -3,7 +3,23 @@ strategies.py — торговые сигналы.
 Каждая стратегия: (market_state, now) -> "Buy" | "Sell" | None.
 Стратегии symbol-agnostic: работают с OBI и σ% (безразмерные величины).
 """
-def fade_obi(market, now, obi_threshold=0.65):
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from src.market import MarketState
+
+
+# Тип возвращаемого сигнала
+Signal = Literal["Buy", "Sell"] | None
+
+
+def fade_obi(
+    market: MarketState,
+    now: float,
+    obi_threshold: float = 0.65,
+) -> Signal:
     """
     Контр-трендовая стратегия (adverse selection).
 
@@ -26,7 +42,11 @@ def fade_obi(market, now, obi_threshold=0.65):
     return None
 
 
-def direct_obi(market, now, obi_threshold=0.65):
+def direct_obi(
+    market: MarketState,
+    now: float,
+    obi_threshold: float = 0.65,
+) -> Signal:
     """
     Прямая стратегия (momentum на OBI).
 
@@ -48,7 +68,12 @@ def direct_obi(market, now, obi_threshold=0.65):
     return None
 
 
-def _momentum_signal(market, now, window_sec, threshold_mult):
+def _momentum_signal(
+    market: MarketState,
+    now: float,
+    window_sec: float,
+    threshold_mult: float,
+) -> float | None:
     """
     Базовый momentum: сравнить текущий mid с mid window_sec назад.
 
@@ -84,7 +109,11 @@ def _momentum_signal(market, now, window_sec, threshold_mult):
     return move_pct
 
 
-def momentum_10s(market, now, threshold_mult=0.25):
+def momentum_10s(
+    market: MarketState,
+    now: float,
+    threshold_mult: float = 0.25,
+) -> Signal:
     """Momentum: Buy если цена выросла за 10s, Sell если упала."""
     move = _momentum_signal(market, now, 10.0, threshold_mult)
     if move is None:
@@ -92,7 +121,11 @@ def momentum_10s(market, now, threshold_mult=0.25):
     return "Buy" if move > 0 else "Sell"
 
 
-def momentum_60s(market, now, threshold_mult=0.25):
+def momentum_60s(
+    market: MarketState,
+    now: float,
+    threshold_mult: float = 0.25,
+) -> Signal:
     """Momentum на 60s окне."""
     move = _momentum_signal(market, now, 60.0, threshold_mult)
     if move is None:
@@ -100,7 +133,11 @@ def momentum_60s(market, now, threshold_mult=0.25):
     return "Buy" if move > 0 else "Sell"
 
 
-def meanrev_10s(market, now, threshold_mult=0.25):
+def meanrev_10s(
+    market: MarketState,
+    now: float,
+    threshold_mult: float = 0.25,
+) -> Signal:
     """Контр-моментум: Sell если цена выросла, Buy если упала."""
     move = _momentum_signal(market, now, 10.0, threshold_mult)
     if move is None:
@@ -108,7 +145,11 @@ def meanrev_10s(market, now, threshold_mult=0.25):
     return "Sell" if move > 0 else "Buy"
 
 
-def meanrev_60s(market, now, threshold_mult=0.25):
+def meanrev_60s(
+    market: MarketState,
+    now: float,
+    threshold_mult: float = 0.25,
+) -> Signal:
     """Контр-моментум на 60s окне."""
     move = _momentum_signal(market, now, 60.0, threshold_mult)
     if move is None:
@@ -128,7 +169,12 @@ STRATEGIES = {
 }
 
 
-def evaluate(strategy_name: str, market, now, **kwargs):
+def evaluate(
+    strategy_name: str,
+    market: MarketState,
+    now: float,
+    **kwargs: Any,
+) -> Signal:
     """
     Универсальная точка вызова.
 

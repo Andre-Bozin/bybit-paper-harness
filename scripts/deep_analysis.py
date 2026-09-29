@@ -4,17 +4,51 @@ deep_analysis.py — глубокий анализ логов завершённ
 
 Использование:
     python3 -m scripts.deep_analysis
+    python3 -m scripts.deep_analysis --archive archive/final_run_20260927
 """
+from __future__ import annotations
+
 import json
 import statistics
-from pathlib import Path
+from argparse import ArgumentParser
 from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, TypedDict
 
 from src import config
 
 
-# Путь к архиву — переопределяется через --archive или берётся последний
-ARCHIVE_DIR = config.PROJECT_ROOT / "archive"
+# Path to archive root
+ARCHIVE_DIR: Path = config.PROJECT_ROOT / "archive"
+
+
+# --- TypedDict structures ---
+
+class Trade(TypedDict):
+    """Реконструированная сделка: ENTRY + exit event."""
+    entry_ts: float | None
+    side: str | None
+    entry_price: float | None
+    tp: float | None
+    sl: float | None
+    sigma_pct: float | None
+    obi: float | None
+    exit_ts: float | None
+    exit_type: str | None
+    usdt_at_close: float | None
+
+
+class AgentResult(TypedDict):
+    """Метрики одного агента после deep analysis."""
+    name: str
+    symbol: str
+    n_trades: int
+    exit_types: dict[str, int]
+    median_time_all: float | None
+    median_time_by_type: dict[str, float]
+    median_sigma: float | None
+    mean_obi: float | None
+    errors: list[str]
 
 
 def find_latest_archive() -> Path:  # noqa: D401
@@ -27,7 +61,7 @@ def find_latest_archive() -> Path:  # noqa: D401
     return candidates[-1]
 
 
-def read_jsonl(path: Path) -> list:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Читает JSON-lines, игнорирует мусор, сортирует по ts."""
     if not path.exists():
         return []
@@ -44,7 +78,7 @@ def read_jsonl(path: Path) -> list:
     return events
 
 
-def list_agents(logs_dir: Path) -> list:
+def list_agents(logs_dir: Path) -> list[str]:
     """Список агентов по trade_*.log (slice префикса, не replace)."""
     prefix = "trade_"
     names = []
@@ -53,7 +87,7 @@ def list_agents(logs_dir: Path) -> list:
     return sorted(names)
 
 
-def reconstruct_trades(trade_events: list) -> list:
+def reconstruct_trades(trade_events: list[dict[str, Any]]) -> list[Trade]:
     """
     Пара (ENTRY → exit) формирует одну сделку.
     exit = STOP_LOSS | HARD_KILL | DECAY_EXIT | CLOSE_DETECTED
@@ -89,8 +123,12 @@ def reconstruct_trades(trade_events: list) -> list:
     return trades
 
 
-def check_invariants(trades: list, trade_events: list, agent_log: list,
-                     start_balance: float) -> list:
+def check_invariants(
+    trades: list[Trade],
+    trade_events: list[dict[str, Any]],
+    agent_log: list[dict[str, Any]],
+    start_balance: float,
+) -> list[str]:
     """Возвращает список нарушенных инвариантов.
     trade_events — сырые события из trade_*.log (для FINAL_SNAPSHOT).
     agent_log — события из agent_*.log (для fee/pnl)."""
@@ -160,9 +198,13 @@ def check_invariants(trades: list, trade_events: list, agent_log: list,
     return errors
 
 
-def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
-    trade_log = read_jsonl(logs_dir / f"trade_{name}.log")
-    agent_log = read_jsonl(logs_dir / f"agent_{name}.log")
+def analyze_agent(
+    name: str,
+    logs_dir: Path,
+    start_balance: float,
+) -> AgentResult:
+    trade_log: list[dict[str, Any]] = read_jsonl(logs_dir / f"trade_{name}.log")
+    agent_log: list[dict[str, Any]] = read_jsonl(logs_dir / f"agent_{name}.log")
 
     trades = reconstruct_trades(trade_log)
     errors = check_invariants(trades, trade_log, agent_log, start_balance)
@@ -187,6 +229,7 @@ def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
 
     return {
         "name": name,
+        "symbol": "",   # заполняется в main() из config.json
         "n_trades": n,
         "exit_types": dict(exit_types),
         "median_time_all": statistics.median(times_all) if times_all else None,
@@ -199,17 +242,17 @@ def analyze_agent(name: str, logs_dir: Path, start_balance: float) -> dict:
     }
 
 
-def format_report(results: list, archive_name: str) -> str:
-    lines = []
+def format_report(results: list[AgentResult], archive_name: str) -> str:
+    lines: list[str] = []
     lines.append("=" * 100)
     lines.append(f"DEEP ANALYSIS — {archive_name}")
     lines.append("=" * 100)
     lines.append("")
 
     # Aggregates
-    total_trades = 0
-    total_exit_types = Counter()
-    total_times = []
+    total_trades: int = 0
+    total_exit_types: Counter[str] = Counter()
+    total_times: list[float] = []
 
     for r in results:
         symbol = r.get("symbol", "?")
@@ -271,7 +314,7 @@ def format_report(results: list, archive_name: str) -> str:
     return "\n".join(lines)
 
 
-def main():
+def main() -> None:
     """
     Читает последний (или указанный) archive/final_run_*, проверяет
     инварианты, генерирует отчёт в reports/deep_analysis.txt.
@@ -280,9 +323,9 @@ def main():
         python3 -m scripts.deep_analysis
         python3 -m scripts.deep_analysis --archive archive/final_run_20260927
     """
-    from argparse import ArgumentParser
-
-    parser = ArgumentParser(description="Deep analysis of a completed harness run")
+    parser: ArgumentParser = ArgumentParser(
+        description="Deep analysis of a completed harness run"
+    )
     parser.add_argument(
         "--archive", "-a",
         default=None,
@@ -308,27 +351,27 @@ def main():
     print()
 
     # Config из archive (start_balance + symbol map)
-    start_balance = 1000.0
-    symbol_map = {}
-    cfg_path = archive / "config.json"
+    start_balance: float = 1000.0
+    symbol_map: dict[str, str] = {}
+    cfg_path: Path = archive / "config.json"
     if cfg_path.exists():
         try:
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            start_balance = cfg.get("meta", {}).get("start_balance", 1000.0)
+            cfg: dict[str, Any] = json.loads(cfg_path.read_text(encoding="utf-8"))
+            start_balance = float(cfg.get("meta", {}).get("start_balance", 1000.0))
             symbol_map = {
-                a.get("name"): a.get("symbol", "?")
+                a.get("name", "?"): a.get("symbol", "?")
                 for a in cfg.get("agents", [])
             }
         except json.JSONDecodeError as e:
             print(f"[deep_analysis] WARN: cannot parse config.json: {e}")
 
-    agents = list_agents(logs_dir)
+    agents: list[str] = list_agents(logs_dir)
     print(f"[deep_analysis] Agents: {agents}")
     print()
 
-    results = []
+    results: list[AgentResult] = []
     for name in agents:
-        r = analyze_agent(name, logs_dir, start_balance)
+        r: AgentResult = analyze_agent(name, logs_dir, start_balance)
         r["symbol"] = symbol_map.get(name, "?")
         results.append(r)
 

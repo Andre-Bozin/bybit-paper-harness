@@ -2,6 +2,8 @@
 harness.py — Multi-agent paper trading orchestrator.
 Один WebSocket, N MarketState (по одному на символ), M Agent'ов.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -11,13 +13,17 @@ import time
 from argparse import ArgumentParser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
 import websockets
 
 from src import config, metadata
+from src.agent import Agent
 from src.market import MarketState
 from src.session import PaperSession
-from src.agent import Agent
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 
 def setup_events_logger() -> logging.Logger:
@@ -84,16 +90,16 @@ def _startup_check() -> None:
 class Harness:
     """Главный orchestrator."""
 
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-        self.events = setup_events_logger()
-        self.meta = cfg["meta"]
-        self.symbols = config.get_symbols(cfg)
-        self.category = config.get_category(cfg)
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.cfg: dict[str, Any] = cfg
+        self.events: logging.Logger = setup_events_logger()
+        self.meta: dict[str, Any] = cfg["meta"]
+        self.symbols: list[str] = config.get_symbols(cfg)
+        self.category: str = config.get_category(cfg)
 
-        self.markets = {}   # symbol -> MarketState
-        self.agents = []    # list of Agent
-        self._shutdown_done = False
+        self.markets: dict[str, MarketState] = {}   # symbol -> MarketState
+        self.agents: list[Agent] = []               # list of Agent
+        self._shutdown_done: bool = False
 
         self._build()
 
@@ -110,8 +116,8 @@ class Harness:
             self.events.info(f"[SYSTEM] MarketState created for {sym}")
 
         # 2. Создаём агентов
-        start_usdt = float(self.cfg["meta"].get("start_balance", 1000.0))
-        instrument_cache = {}
+        start_usdt: float = float(self.cfg["meta"].get("start_balance", 1000.0))
+        instrument_cache: dict[str, dict[str, Any]] = {}
 
         for agent_cfg in self.cfg["agents"]:
             symbol = agent_cfg["symbol"]
@@ -136,7 +142,7 @@ class Harness:
                 f"strategy={agent_cfg['signal']} symbol={symbol} qty={agent_cfg['qty']}"
             )
 
-    async def keep_alive(self, ws) -> None:
+    async def keep_alive(self, ws: ClientConnection) -> None:
         """
         Bybit требует ping каждые ~20s.
         При ошибке — закрывает WS, чтобы ws_loop сделал реконнект.
@@ -168,9 +174,9 @@ class Harness:
         # Формируем подписки (publicTrade не используется — не подписываемся)
         args = [f"orderbook.50.{sym}" for sym in self.symbols]
 
-        backoff = 3
-        reconnect_count = 0
-        ka_task = None
+        backoff: int = 3
+        reconnect_count: int = 0
+        ka_task: asyncio.Task[None] | None = None
 
         while True:
             try:
@@ -203,7 +209,7 @@ class Harness:
 
     async def _handle_message(self, raw: str) -> None:
         try:
-            data = json.loads(raw)
+            data: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError:
             return
 
@@ -240,7 +246,7 @@ class Harness:
         """Периодический статус всех агентов."""
         while True:
             await asyncio.sleep(interval)
-            parts = []
+            parts: list[str] = []
             for a in self.agents:
                 snap = a.snapshot()
                 parts.append(
@@ -281,9 +287,9 @@ class Harness:
 
 async def _run_with_signals(h: Harness) -> None:
     """Запускает Harness, реагирует на SIGTERM/SIGINT, чистит handlers."""
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-    installed = []
+    loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+    stop_event: asyncio.Event = asyncio.Event()
+    installed: list[str] = []
 
     def _handle_signal(sig_name: str):
         print(f"\n[harness] Signal {sig_name} received, stopping...")
@@ -327,8 +333,8 @@ async def _run_with_signals(h: Harness) -> None:
                 pass
 
 
-def main():
-    parser = ArgumentParser(description="Bybit paper trading harness")
+def main() -> None:
+    parser: ArgumentParser = ArgumentParser(description="Bybit paper trading harness")
     parser.add_argument(
         "--config", "-c",
         default=str(config.DEFAULT_CONFIG),
