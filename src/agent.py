@@ -31,22 +31,13 @@ def _setup_agent_logger(name: str) -> logging.Logger:
 class Agent:
     """Торговый агент. Один экземпляр на конфиг агента."""
 
-    # Классовые константы (могут быть переопределены из cfg)
-    DEFAULT_ORDER_COOLDOWN = 2.0       # секунды между однотипными PLACE
-    TP_MARGIN_BASE_PCT = 0.05          # базовый % TP
-    TP_MARGIN_SIGMA_MULT = 3.0         # TP = base + mult * sigma_pct
-    TP_MARGIN_MIN_PCT = 0.15           # нижняя граница TP %
-    TP_MARGIN_MAX_PCT = 0.75           # верхняя граница TP %
-    DECAY_EXIT_MIN_PCT = 0.02          # decay exit когда margin_pct < 0.02%
-    AMEND_TP_MIN_REL = 0.0001          # 0.01% — порог для переставления TP
-
     def __init__(self, cfg: dict, market, session: PaperSession):
         self.name = cfg["name"]
         self.cfg = cfg
         self.market = market
         self.session = session
 
-        # Config
+        # Strategy config (все из cfg с fallback на config defaults)
         self.strategy = cfg["signal"]
         self.qty = float(cfg["qty"])
         self.obi_threshold = float(cfg.get("obi_threshold", 0.65))
@@ -56,6 +47,26 @@ class Agent:
         self.decay_duration = float(cfg.get("decay_duration", 600))
         self.hard_kill = float(cfg.get("hard_kill", 900))
         self.sl_cooldown = float(cfg.get("sl_cooldown", 300))
+
+        # TP/SL constants из config (per-instance, можно override через cfg)
+        self.tp_margin_base_pct = float(
+            cfg.get("tp_margin_base_pct", config.TP_MARGIN_BASE_PCT)
+        )
+        self.tp_margin_sigma_mult = float(
+            cfg.get("tp_margin_sigma_mult", config.TP_MARGIN_SIGMA_MULT)
+        )
+        self.tp_margin_min_pct = float(
+            cfg.get("tp_margin_min_pct", config.TP_MARGIN_MIN_PCT)
+        )
+        self.tp_margin_max_pct = float(
+            cfg.get("tp_margin_max_pct", config.TP_MARGIN_MAX_PCT)
+        )
+        self.decay_exit_min_pct = float(
+            cfg.get("decay_exit_min_pct", config.DECAY_EXIT_MIN_PCT)
+        )
+        self.amend_tp_min_rel = float(
+            cfg.get("amend_tp_min_rel", config.AMEND_TP_MIN_REL)
+        )
 
         # Logger for trade events
         self.log = _setup_agent_logger(self.name)
@@ -75,7 +86,7 @@ class Agent:
         self._last_placed_side = None
         self._last_side_change = 0.0
         self._order_place_cooldown = float(
-            cfg.get("order_cooldown", self.DEFAULT_ORDER_COOLDOWN)
+            cfg.get("order_cooldown", config.DEFAULT_ORDER_COOLDOWN)
         )
         # Значения сигнала на момент решения (PLACE). Используются в ENTRY.
         self._place_sigma_pct = 0.0
@@ -273,7 +284,7 @@ class Agent:
 
             # Decay exit fires when remaining margin < 0.02% of price.
             # (Previously was absolute "< 1.0 USDT" — broke all non-BTC symbols.)
-            if new_margin_pct < self.DECAY_EXIT_MIN_PCT:
+            if new_margin_pct < self.decay_exit_min_pct:
                 exit_side = "Sell" if self.position_side == "Buy" else "Buy"
                 self.session.cancel_all()
                 ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
@@ -294,7 +305,7 @@ class Agent:
                 new_tp = self.entry_price - new_margin
 
             # Amend TP only if change is significant relative to price.
-            amend_threshold = self.entry_price * self.AMEND_TP_MIN_REL
+            amend_threshold = self.entry_price * self.amend_tp_min_rel
             if abs(new_tp - self.current_tp) >= amend_threshold:
                 if self.tp_oid is not None:
                     self.session.cancel(self.tp_oid)
@@ -325,8 +336,9 @@ class Agent:
         Динамический TP-margin в % от цены. Зависит от σ%.
         TP% = clamp(BASE + SIGMA_MULT * sigma_pct, MIN, MAX).
         """
-        m = self.TP_MARGIN_BASE_PCT + self.TP_MARGIN_SIGMA_MULT * self.market.current_std_dev_pct
-        return max(self.TP_MARGIN_MIN_PCT, min(self.TP_MARGIN_MAX_PCT, m))
+        m = (self.tp_margin_base_pct
+             + self.tp_margin_sigma_mult * self.market.current_std_dev_pct)
+        return max(self.tp_margin_min_pct, min(self.tp_margin_max_pct, m))
 
     def _evaluate_signal(self, now: float):
         """

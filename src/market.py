@@ -8,29 +8,47 @@ import time
 import statistics
 from collections import deque
 
+from src import config
+
 
 class MarketState:
     """
     Состояние одного символа: стакан, σ%, OBI.
 
-    Class-level constants — можно переопределить через наследование.
+    Константы читаются из config при инициализации,
+    но могут быть переопределены через аргументы (per-instance).
     """
 
-    SIGMA_WINDOW_SEC = 60.0
-    SIGMA_MIN_SAMPLES = 50
-    TOP_LEVELS = 10
-
-    def __init__(self, symbol: str):
+    def __init__(
+        self,
+        symbol: str,
+        sigma_window_sec: float | None = None,
+        sigma_min_samples: int | None = None,
+        obi_top_levels: int | None = None,
+    ):
         self.symbol = symbol
-        self.bids = {}  # price -> size
-        self.asks = {}  # price -> size
-        self.price_history = deque()   # (ts, mid_price)
-        self.current_std_dev = 0.0
-        self.current_std_dev_pct = 0.0
-        self.current_obi = 0.0
-        self.best_bid = 0.0
-        self.best_ask = 0.0
-        self.last_update_ts = 0.0
+        self.sigma_window_sec = (
+            sigma_window_sec if sigma_window_sec is not None
+            else config.SIGMA_WINDOW_SEC
+        )
+        self.sigma_min_samples = (
+            sigma_min_samples if sigma_min_samples is not None
+            else config.SIGMA_MIN_SAMPLES
+        )
+        self.obi_top_levels = (
+            obi_top_levels if obi_top_levels is not None
+            else config.OBI_TOP_LEVELS
+        )
+
+        self.bids: dict[float, float] = {}
+        self.asks: dict[float, float] = {}
+        self.price_history: deque[tuple[float, float]] = deque()
+        self.current_std_dev: float = 0.0
+        self.current_std_dev_pct: float = 0.0
+        self.current_obi: float = 0.0
+        self.best_bid: float = 0.0
+        self.best_ask: float = 0.0
+        self.last_update_ts: float = 0.0
 
     # --- Orderbook updates ---
 
@@ -89,11 +107,11 @@ class MarketState:
         self.price_history.append((ts, mid))
 
         # Trim old
-        cutoff = ts - self.SIGMA_WINDOW_SEC
+        cutoff = ts - self.sigma_window_sec
         while self.price_history and self.price_history[0][0] < cutoff:
             self.price_history.popleft()
 
-        if len(self.price_history) >= self.SIGMA_MIN_SAMPLES:
+        if len(self.price_history) >= self.sigma_min_samples:
             prices = [p[1] for p in self.price_history]
             self.current_std_dev = statistics.stdev(prices)
             self.current_std_dev_pct = (
@@ -127,9 +145,9 @@ class MarketState:
         if not book:
             return 0.0
         if reverse:  # bids — top-N по максимальной цене
-            top = heapq.nlargest(self.TOP_LEVELS, book.keys())
+            top = heapq.nlargest(self.obi_top_levels, book.keys())
         else:        # asks — top-N по минимальной цене
-            top = heapq.nsmallest(self.TOP_LEVELS, book.keys())
+            top = heapq.nsmallest(self.obi_top_levels, book.keys())
         return sum(book[p] for p in top)
 
     # --- Snapshot for agent ---

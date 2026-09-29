@@ -28,6 +28,21 @@ for d in (LOGS_DIR, REPORTS_DIR, CACHE_DIR):
 # --- Defaults ---
 HTTP_TIMEOUT = 10.0
 CACHE_VERSION = "v1"     # bump при изменении структуры кэша
+
+# --- Market state ---
+SIGMA_WINDOW_SEC = 60.0    # σ% window (seconds)
+SIGMA_MIN_SAMPLES = 50     # minimum samples for σ% calculation
+OBI_TOP_LEVELS = 10        # orderbook levels for OBI
+
+# --- Agent / TP/SL ---
+TP_MARGIN_BASE_PCT = 0.05     # base TP margin %
+TP_MARGIN_SIGMA_MULT = 3.0    # TP = base + mult × σ%
+TP_MARGIN_MIN_PCT = 0.15      # TP margin lower bound %
+TP_MARGIN_MAX_PCT = 0.75      # TP margin upper bound %
+DECAY_EXIT_MIN_PCT = 0.02     # decay exit when remaining margin < this %
+AMEND_TP_MIN_REL = 0.0001     # amend TP only if move > 0.01% of price
+DEFAULT_ORDER_COOLDOWN = 2.0  # min seconds between same-side PLACE
+VPIN_IMBALANCE = 5.0          # taker buy/sell ratio threshold (future)
 # Realistic retail defaults (Bybit standard tier, 2026).
 # If BYBIT_API_KEY/SECRET in env — actual fees are fetched per symbol.
 DEFAULT_MAKER_FEE = 0.00036
