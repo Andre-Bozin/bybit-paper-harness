@@ -49,19 +49,36 @@ A symbol is only tradeable when the natural movement over the strategy's hold wi
 
 Otherwise fees dominate gross PnL — **no signal can overcome them**.
 
-### Empirical results (2026-09-27, 19h paper run)
+### Empirical results — two independent runs
 
-| Symbol | sigma_pct(60s) | sigma_pct x 3 | Real fee RT | Ratio | Verdict |
-|---|---|---|---|---|---|
-| **DOGEUSDT** | 0.078% | 0.234% | 0.136% | 1.7x | marginal |
-| **BTCUSDT** | 0.0076% | 0.023% | 0.136% | 0.17x | unviable |
-| **ETHUSDT** | 0.0048% | 0.014% | 0.136% | 0.10x | unviable |
+We ran the same 12-agent configuration twice: first with assumed retail fees (0.02% / 0.055%), then with **real fees fetched from Bybit** (0.036% / 0.1%).
 
-**Full experiment:** 12 agents x 3 symbols x 19 hours = **1293 trades**.
+**Run 1 — assumed fees (0.020% / 0.055%), 19h:**
 
-- **BTC/ETH:** 85% of exits via time-decay (TP never reached — fee > any realistic move).
-- **DOGE:** 50% decay exits, still net negative.
-- **Conclusion:** at retail fee tiers, tick-level scalping on Bybit is structurally unprofitable — regardless of signal quality.
+| Symbol | WR% | Decay exits | Net PnL | Fee/Gross |
+|---|---|---|---|---|
+| DOGEUSDT | 53-67% | 50% | -1.83 | 1.7x |
+| BTCUSDT | 48-58% | 85% | -28.71 | 0.17x |
+| ETHUSDT | 53-63% | 60% | -8.89 | 0.10x |
+| **TOTAL** | | | **-39.43** | |
+
+**Run 2 — real fees (0.036% / 0.100%), 17.7h:**
+
+| Symbol | WR% | Decay exits | Net PnL | Fee/Gross |
+|---|---|---|---|---|
+| DOGEUSDT | 57-69% | 50% | -2.07 | 1.7x |
+| BTCUSDT | 53-60% | 70% | **-42.78** | 0.36x |
+| ETHUSDT | 53-63% | 60% | **-15.76** | 0.22x |
+| **TOTAL** | | | **-60.61** | |
+
+**Real fees worsened PnL by ~1.5x** (not 1.8x — because limit closes pay maker only).
+
+**Per-symbol hourly bleed (Run 2):**
+- BTCUSDT: **-0.55 USDT/hour**
+- ETHUSDT: **-0.20 USDT/hour**
+- DOGEUSDT: **-0.06 USDT/hour** (marginal)
+
+**Two independent runs, 2522 trades, 0 invariant violations. Same conclusion: 0 winners out of 12 agents.**
 
 ### What this means for you
 
