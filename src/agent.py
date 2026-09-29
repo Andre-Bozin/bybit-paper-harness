@@ -3,13 +3,41 @@ agent.py — торговый агент.
 Один агент = одна стратегия + одна PaperSession + свой конфиг.
 Символ берётся из MarketState (может быть любой).
 """
+from __future__ import annotations
+
 import json
-import time
 import logging
+import time
 from logging.handlers import RotatingFileHandler
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from src import config, strategies
 from src.session import PaperSession
+
+if TYPE_CHECKING:
+    from src.market import MarketState
+
+
+# --- Type aliases ---
+Side = Literal["Buy", "Sell"]
+Signal = Literal["Buy", "Sell"] | None
+
+
+# --- TypedDict structures ---
+
+class AgentSnapshot(TypedDict):
+    """Snapshot состояния агента (для status_loop и мониторинга)."""
+    name: str
+    symbol: str
+    strategy: str
+    usdt: float
+    position_side: str
+    position_size: float
+    entry_price: float
+    open_orders: int
+    sl_price: float
+    current_tp: float
+    in_cooldown: bool
 
 
 def _setup_agent_logger(name: str) -> logging.Logger:
@@ -31,11 +59,16 @@ def _setup_agent_logger(name: str) -> logging.Logger:
 class Agent:
     """Торговый агент. Один экземпляр на конфиг агента."""
 
-    def __init__(self, cfg: dict, market, session: PaperSession):
-        self.name = cfg["name"]
-        self.cfg = cfg
-        self.market = market
-        self.session = session
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        market: MarketState,
+        session: PaperSession,
+    ) -> None:
+        self.name: str = cfg["name"]
+        self.cfg: dict[str, Any] = cfg
+        self.market: MarketState = market
+        self.session: PaperSession = session
 
         # Strategy config (все из cfg с fallback на config defaults)
         self.strategy = cfg["signal"]
@@ -72,19 +105,19 @@ class Agent:
         self.log = _setup_agent_logger(self.name)
 
         # Runtime state
-        self.daily_block = False    # внешний флаг от harness
-        self.position_open = False
-        self.position_side = None
-        self.entry_price = 0.0
-        self.entry_time = 0.0
-        self.entry_tp_margin = 0.0
-        self.current_tp = 0.0
-        self.sl_price = 0.0
-        self.active_oid = None      # входной лимит
-        self.tp_oid = None          # TP-лимит
-        self.sl_until = 0.0         # cooldown после SL
-        self._last_placed_side = None
-        self._last_side_change = 0.0
+        self.daily_block: bool = False    # внешний флаг от harness
+        self.position_open: bool = False
+        self.position_side: Side | None = None
+        self.entry_price: float = 0.0
+        self.entry_time: float = 0.0
+        self.entry_tp_margin: float = 0.0
+        self.current_tp: float = 0.0
+        self.sl_price: float = 0.0
+        self.active_oid: str | None = None    # входной лимит
+        self.tp_oid: str | None = None        # TP-лимит
+        self.sl_until: float = 0.0            # cooldown после SL
+        self._last_placed_side: Side | None = None
+        self._last_side_change: float = 0.0
         self._order_place_cooldown = float(
             cfg.get("order_cooldown", config.DEFAULT_ORDER_COOLDOWN)
         )
@@ -155,7 +188,7 @@ class Agent:
             self._log({"event": "PLACE_REJECTED", "side": side, "price": price,
                        "reason": str(e)})
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> AgentSnapshot:
         pos = self.session.position
         return {
             "name": self.name,
@@ -213,7 +246,7 @@ class Agent:
             self.current_tp = self.entry_price - margin
 
         # Ставим TP-лимит
-        exit_side = "Sell" if self.position_side == "Buy" else "Buy"
+        exit_side: Side = "Sell" if self.position_side == "Buy" else "Buy"
         try:
             self.tp_oid = self.session.place_limit(exit_side, self.current_tp, self.qty)
         except ValueError as e:
@@ -248,7 +281,7 @@ class Agent:
                 (self.position_side == "Sell" and self.market.best_ask >= self.sl_price)
             )
             if hit:
-                exit_side = "Sell" if self.position_side == "Buy" else "Buy"
+                exit_side: Side = "Sell" if self.position_side == "Buy" else "Buy"
                 self.session.cancel_all()
                 ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
                 if not ok:
@@ -265,7 +298,7 @@ class Agent:
 
         # --- HARD_KILL ---
         if elapsed > self.hard_kill:
-            exit_side = "Sell" if self.position_side == "Buy" else "Buy"
+            exit_side: Side = "Sell" if self.position_side == "Buy" else "Buy"
             self.session.cancel_all()
             ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
             if not ok:
@@ -285,7 +318,7 @@ class Agent:
             # Decay exit fires when remaining margin < 0.02% of price.
             # (Previously was absolute "< 1.0 USDT" — broke all non-BTC symbols.)
             if new_margin_pct < self.decay_exit_min_pct:
-                exit_side = "Sell" if self.position_side == "Buy" else "Buy"
+                exit_side: Side = "Sell" if self.position_side == "Buy" else "Buy"
                 self.session.cancel_all()
                 ok = self.session.place_market(exit_side, self.qty, reduce_only=True)
                 if not ok:
@@ -309,7 +342,7 @@ class Agent:
             if abs(new_tp - self.current_tp) >= amend_threshold:
                 if self.tp_oid is not None:
                     self.session.cancel(self.tp_oid)
-                exit_side = "Sell" if self.position_side == "Buy" else "Buy"
+                exit_side: Side = "Sell" if self.position_side == "Buy" else "Buy"
                 try:
                     self.tp_oid = self.session.place_limit(exit_side, new_tp, self.qty)
                     self.current_tp = new_tp
@@ -340,7 +373,7 @@ class Agent:
              + self.tp_margin_sigma_mult * self.market.current_std_dev_pct)
         return max(self.tp_margin_min_pct, min(self.tp_margin_max_pct, m))
 
-    def _evaluate_signal(self, now: float):
+    def _evaluate_signal(self, now: float) -> Signal:
         """
         Вызов стратегии с правильными kwargs.
         Возвращает "Buy" | "Sell" | None.
@@ -381,7 +414,7 @@ class Agent:
         self._place_sigma_pct = 0.0
         self._place_obi = 0.0
 
-    def _log(self, event: dict) -> None:
+    def _log(self, event: dict[str, Any]) -> None:
         event["ts"] = time.time()
         event["agent"] = self.name
         self.log.info(json.dumps(event, ensure_ascii=False))
